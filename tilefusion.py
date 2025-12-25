@@ -999,6 +999,12 @@ class TileFusion:
         block_size = (block_size // self.chunk_y) * self.chunk_y
         block_size = max(block_size, self.chunk_y * 2)  # Minimum 2 chunks
 
+        # Cap block size for optimal performance (memory bandwidth vs tile re-reads)
+        # Large blocks (>10K) cause memory bandwidth saturation during accumulation
+        # and slower memory allocation. 8K-12K is optimal for most workloads.
+        max_block_size = 10240  # ~0.8GB accumulator, good balance
+        block_size = min(block_size, max_block_size)
+
         pad_Y, pad_X = self.padded_shape
 
         # If block covers entire image, use full mode (more efficient)
