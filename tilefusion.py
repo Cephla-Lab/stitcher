@@ -10,6 +10,7 @@ The final fused volume is written to an OME-NGFF v0.5 Zarr store using tensorsto
 import gc
 import json
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import cpu_count
 from pathlib import Path
 from typing import List, Sequence, Tuple, Union, Any, Dict, Optional
 import xml.etree.ElementTree as ET
@@ -62,6 +63,73 @@ def _ssim(arr1: Any, arr2: Any, win_size: int) -> float:
     if data_range == 0:
         data_range = 1.0
     return float(_ssim_cpu(arr1_np, arr2_np, win_size=win_size, data_range=data_range))
+
+
+def _register_pair_worker(args: Tuple) -> Tuple:
+    """
+    Worker function for parallel registration of a tile pair.
+    Must be at module level for pickling by ProcessPoolExecutor.
+
+    Parameters
+    ----------
+    args : tuple
+        (i_pos, j_pos, patch_i, patch_j, df, sw, th, max_shift)
+
+    Returns
+    -------
+    tuple
+        (i_pos, j_pos, dy_s, dx_s, score) or (i_pos, j_pos, None, None, None) on failure
+    """
+    from skimage.exposure import match_histograms as mh_cpu
+    from skimage.measure import block_reduce as br_cpu
+    from skimage.registration import phase_cross_correlation as pcc_cpu
+    from skimage.metrics import structural_similarity as ssim_cpu
+    from scipy.ndimage import shift as shift_cpu
+
+    i_pos, j_pos, patch_i, patch_j, df, sw, th, max_shift = args
+
+    try:
+        # Downsample
+        reduce_block = (1, df[0], df[1]) if patch_i.ndim == 3 else tuple(df)
+        g1 = br_cpu(patch_i, reduce_block, np.mean)
+        g2 = br_cpu(patch_j, reduce_block, np.mean)
+
+        # Squeeze to 2D if needed
+        while g1.ndim > 2 and g1.shape[0] == 1:
+            g1 = g1[0]
+            g2 = g2[0]
+
+        # Match histograms
+        g2 = mh_cpu(g2, g1)
+
+        # Phase cross-correlation
+        shift, _, _ = pcc_cpu(
+            g1.astype(np.float32),
+            g2.astype(np.float32),
+            normalization="phase",
+            upsample_factor=10,
+        )
+
+        # Apply shift and compute SSIM
+        g2s = shift_cpu(g2, shift=shift, order=1, prefilter=False)
+        data_range = float(g1.max() - g1.min())
+        if data_range == 0:
+            data_range = 1.0
+        ssim_val = float(ssim_cpu(g1, g2s, win_size=sw, data_range=data_range))
+
+        # Scale shift back to original resolution
+        dy_s, dx_s = int(np.round(shift[0] * df[0])), int(np.round(shift[1] * df[1]))
+
+        # Check thresholds
+        if th != 0.0 and ssim_val < th:
+            return (i_pos, j_pos, None, None, None)
+        if abs(dy_s) > max_shift[0] or abs(dx_s) > max_shift[1]:
+            return (i_pos, j_pos, None, None, None)
+
+        return (i_pos, j_pos, dy_s, dx_s, round(ssim_val, 3))
+
+    except Exception:
+        return (i_pos, j_pos, None, None, None)
 
 
 @njit(parallel=True)
@@ -588,6 +656,7 @@ class TileFusion:
         ssim_window: int = None,
         ch_idx: int = 0,
         threshold: float = None,
+        parallel: bool = True,
     ) -> None:
         """
         Detect and score overlaps between neighboring tile pairs via cross-correlation.
@@ -602,6 +671,9 @@ class TileFusion:
             Channel to use.
         threshold : float, optional
             SSIM threshold to accept a link.
+        parallel : bool, optional
+            If True, use multiprocessing for CPU mode. Default True.
+            Ignored when using GPU (GPU is already fast).
         """
         df = downsample_factors or self.downsample_factors
         sw = ssim_window or self.ssim_window
@@ -609,12 +681,7 @@ class TileFusion:
         self.pairwise_metrics.clear()
 
         n_pos = self.position_dim
-        executor = ThreadPoolExecutor(max_workers=2)
-
-        def bounds_1d(off, length, total_length):
-            start = max(0, off)
-            end = min(total_length, off + length)
-            return start, end
+        max_shift = (100, 100)
 
         # Build list of adjacent tile pairs (horizontal or vertical neighbors only)
         adjacent_pairs = []
@@ -638,27 +705,104 @@ class TileFusion:
         if self._debug:
             print(f"Found {len(adjacent_pairs)} adjacent tile pairs to register")
 
-        for i_pos, j_pos, dy, dx, overlap_y, overlap_x in tqdm(
-            adjacent_pairs, desc="register", leave=True
-        ):
+        # Compute bounds for each pair
+        pair_bounds = []
+        for i_pos, j_pos, dy, dx, overlap_y, overlap_x in adjacent_pairs:
             bounds_i_y = (max(0, dy), min(self.Y, self.Y + dy))
             bounds_i_x = (max(0, dx), min(self.X, self.X + dx))
             bounds_j_y = (max(0, -dy), min(self.Y, self.Y - dy))
             bounds_j_x = (max(0, -dx), min(self.X, self.X - dx))
 
-            if bounds_i_y[1] <= bounds_i_y[0] or bounds_i_x[1] <= bounds_i_x[0]:
-                continue
+            if bounds_i_y[1] > bounds_i_y[0] and bounds_i_x[1] > bounds_i_x[0]:
+                pair_bounds.append((i_pos, j_pos, bounds_i_y, bounds_i_x, bounds_j_y, bounds_j_x))
+
+        # Use parallel processing for CPU mode, sequential for GPU
+        use_parallel = parallel and not USING_GPU and len(pair_bounds) > 4
+
+        if use_parallel:
+            self._register_parallel(pair_bounds, df, sw, th, max_shift)
+        else:
+            self._register_sequential(pair_bounds, df, sw, th, max_shift)
+
+    def _register_parallel(
+        self,
+        pair_bounds: List[Tuple],
+        df: Tuple[int, int],
+        sw: int,
+        th: float,
+        max_shift: Tuple[int, int],
+    ) -> None:
+        """Register tile pairs using parallel processing (CPU mode)."""
+
+        # Step 1: Read all patches in parallel using threads (I/O bound)
+        def read_pair_patches(args):
+            i_pos, j_pos, bounds_i_y, bounds_i_x, bounds_j_y, bounds_j_x = args
+            try:
+                patch_i = self._read_tile_region(
+                    i_pos, slice(bounds_i_y[0], bounds_i_y[1]), slice(bounds_i_x[0], bounds_i_x[1])
+                )
+                patch_j = self._read_tile_region(
+                    j_pos, slice(bounds_j_y[0], bounds_j_y[1]), slice(bounds_j_x[0], bounds_j_x[1])
+                )
+                return (i_pos, j_pos, patch_i, patch_j)
+            except Exception:
+                return (i_pos, j_pos, None, None)
+
+        print(f"Reading {len(pair_bounds)} patch pairs...")
+        with ThreadPoolExecutor(max_workers=8) as io_executor:
+            patches = list(io_executor.map(read_pair_patches, pair_bounds))
+
+        # Filter out failed reads
+        valid_patches = [(i, j, pi, pj) for i, j, pi, pj in patches if pi is not None]
+
+        # Step 2: Register pairs in parallel using threads
+        # ThreadPoolExecutor works well because numpy/scipy release the GIL
+        work_items = [
+            (i_pos, j_pos, patch_i, patch_j, df, sw, th, max_shift)
+            for i_pos, j_pos, patch_i, patch_j in valid_patches
+        ]
+
+        n_workers = min(cpu_count(), len(work_items), 8)
+        print(f"Registering {len(work_items)} pairs with {n_workers} threads...")
+
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            results = list(
+                tqdm(
+                    executor.map(_register_pair_worker, work_items),
+                    total=len(work_items),
+                    desc="register",
+                    leave=True,
+                )
+            )
+
+        # Collect results
+        for i_pos, j_pos, dy_s, dx_s, score in results:
+            if dy_s is not None:
+                self.pairwise_metrics[(i_pos, j_pos)] = (dy_s, dx_s, score)
+
+    def _register_sequential(
+        self,
+        pair_bounds: List[Tuple],
+        df: Tuple[int, int],
+        sw: int,
+        th: float,
+        max_shift: Tuple[int, int],
+    ) -> None:
+        """Register tile pairs sequentially (GPU mode or small datasets)."""
+        io_executor = ThreadPoolExecutor(max_workers=2)
+
+        for i_pos, j_pos, bounds_i_y, bounds_i_x, bounds_j_y, bounds_j_x in tqdm(
+            pair_bounds, desc="register", leave=True
+        ):
 
             def read_patch(idx, y_bounds, x_bounds):
                 return self._read_tile_region(
-                    idx,
-                    slice(y_bounds[0], y_bounds[1]),
-                    slice(x_bounds[0], x_bounds[1]),
+                    idx, slice(y_bounds[0], y_bounds[1]), slice(x_bounds[0], x_bounds[1])
                 )
 
             try:
-                patch_i = executor.submit(read_patch, i_pos, bounds_i_y, bounds_i_x).result()
-                patch_j = executor.submit(read_patch, j_pos, bounds_j_y, bounds_j_x).result()
+                patch_i = io_executor.submit(read_patch, i_pos, bounds_i_y, bounds_i_x).result()
+                patch_j = io_executor.submit(read_patch, j_pos, bounds_j_y, bounds_j_x).result()
             except Exception as e:
                 if self._debug:
                     print(f"Error reading patches for ({i_pos}, {j_pos}): {e}")
@@ -685,7 +829,6 @@ class TileFusion:
                 continue
 
             dy_s, dx_s = [int(np.round(shift_ds[k] * df[k])) for k in range(2)]
-            max_shift = (100, 100)
 
             if abs(dy_s) > max_shift[0] or abs(dx_s) > max_shift[1]:
                 if self._debug:
@@ -696,7 +839,7 @@ class TileFusion:
 
             self.pairwise_metrics[(i_pos, j_pos)] = (dy_s, dx_s, round(score, 3))
 
-        executor.shutdown(wait=True)
+        io_executor.shutdown(wait=True)
 
     @staticmethod
     def _solve_global(
