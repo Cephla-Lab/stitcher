@@ -283,18 +283,18 @@ def write_ngff_metadata(
             translation = [
                 0.0,
                 0.0,
-                datasets[-1]["coordinateTransformations"][1]["translation"][2]
-                + 0.5 * prev_sp[0],
-                datasets[-1]["coordinateTransformations"][1]["translation"][3]
-                + 0.5 * prev_sp[1],
+                datasets[-1]["coordinateTransformations"][1]["translation"][2] + 0.5 * prev_sp[0],
+                datasets[-1]["coordinateTransformations"][1]["translation"][3] + 0.5 * prev_sp[1],
             ]
-        datasets.append({
-            "path": f"scale{lvl}/{dataset_name}",
-            "coordinateTransformations": [
-                {"type": "scale", "scale": scale},
-                {"type": "translation", "translation": translation},
-            ],
-        })
+        datasets.append(
+            {
+                "path": f"scale{lvl}/{dataset_name}",
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": scale},
+                    {"type": "translation", "translation": translation},
+                ],
+            }
+        )
         prev_sp = spatial
 
     mult = {

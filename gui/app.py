@@ -945,10 +945,12 @@ class StitcherGUI(QMainWindow):
             for scale_dir in scale_dirs:
                 image_path = scale_dir / "image"
                 if image_path.exists():
-                    store = ts.open({
-                        "driver": "zarr3",
-                        "kvstore": {"driver": "file", "path": str(image_path)},
-                    }).result()
+                    store = ts.open(
+                        {
+                            "driver": "zarr3",
+                            "kvstore": {"driver": "file", "path": str(image_path)},
+                        }
+                    ).result()
                     pyramid_data.append(store)
 
             if not pyramid_data:
@@ -963,6 +965,7 @@ class StitcherGUI(QMainWindow):
             channel_names = None
             try:
                 from tilefusion import TileFusion
+
                 tf = TileFusion(self.drop_area.file_path)
                 if hasattr(tf, "_squid_channels"):
                     channel_names = [ch.replace("_", " ") for ch in tf._squid_channels]
@@ -975,7 +978,7 @@ class StitcherGUI(QMainWindow):
 
             def auto_contrast(data, pmax=99.9):
                 """Compute contrast limits optimized for fluorescence microscopy.
-                
+
                 Uses mode-based background detection: finds the histogram peak
                 (background) and sets minimum above it. This effectively
                 suppresses background while preserving signal.
@@ -985,23 +988,23 @@ class StitcherGUI(QMainWindow):
                 flat = data.ravel()
                 if len(flat) > 100000:
                     flat = np.random.choice(flat, 100000, replace=False)
-                
+
                 # Find histogram peak (mode) - this is the background
                 hist, bin_edges = np.histogram(flat, bins=256)
                 mode_idx = np.argmax(hist)
                 mode_val = (bin_edges[mode_idx] + bin_edges[mode_idx + 1]) / 2
-                
+
                 # Estimate background noise (std of values below median)
                 background_pixels = flat[flat <= np.median(flat)]
                 if len(background_pixels) > 0:
                     bg_std = np.std(background_pixels)
                 else:
                     bg_std = mode_val * 0.1
-                
+
                 # Set min to mode + 2*std (above background noise)
                 lo = mode_val + 2 * bg_std
                 hi = np.percentile(data, pmax)
-                
+
                 # Ensure minimum range
                 if hi - lo < 10:
                     hi = lo + 100

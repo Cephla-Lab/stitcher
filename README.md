@@ -22,6 +22,10 @@ cd tilefusion
 # Basic installation (CPU only)
 pip install -e .
 
+# For development (includes linting tools)
+pip install -e ".[dev]"
+pre-commit install  # Enable automatic formatting on commit
+
 # With GUI support
 pip install -e ".[gui]"
 

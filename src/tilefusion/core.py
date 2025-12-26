@@ -90,7 +90,11 @@ class TileFusion:
         threshold: float = 0.5,
         multiscale_factors: Sequence[int] = (2, 4, 8, 16),
         resolution_multiples: Sequence[Union[int, Sequence[int]]] = (
-            (1, 1), (2, 2), (4, 4), (8, 8), (16, 16),
+            (1, 1),
+            (2, 2),
+            (4, 4),
+            (8, 8),
+            (16, 16),
         ),
         max_workers: int = 8,
         debug: bool = False,
@@ -270,9 +274,7 @@ class TileFusion:
         if self._is_zarr_format:
             zarr_ts = self._metadata["tensorstore"]
             is_3d = self._metadata.get("is_3d", False)
-            return read_zarr_region(
-                zarr_ts, tile_idx, y_slice, x_slice, self.channel_to_use, is_3d
-            )
+            return read_zarr_region(zarr_ts, tile_idx, y_slice, x_slice, self.channel_to_use, is_3d)
         elif self._is_individual_tiffs_format:
             return read_individual_tiffs_region(
                 self._metadata["image_folder"],
@@ -372,18 +374,19 @@ class TileFusion:
                 patches = list(io_executor.map(read_pair_patches, batch))
 
             work_items = [
-                (i, j, pi, pj, df, sw, th, max_shift)
-                for i, j, pi, pj in patches if pi is not None
+                (i, j, pi, pj, df, sw, th, max_shift) for i, j, pi, pj in patches if pi is not None
             ]
 
             desc = f"register {batch_idx+1}/{n_batches}" if n_batches > 1 else "register"
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                results = list(tqdm(
-                    executor.map(register_pair_worker, work_items),
-                    total=len(work_items),
-                    desc=desc,
-                    leave=True,
-                ))
+                results = list(
+                    tqdm(
+                        executor.map(register_pair_worker, work_items),
+                        total=len(work_items),
+                        desc=desc,
+                        leave=True,
+                    )
+                )
 
             for i_pos, j_pos, dy_s, dx_s, score in results:
                 if dy_s is not None:
@@ -406,6 +409,7 @@ class TileFusion:
         for i_pos, j_pos, bounds_i_y, bounds_i_x, bounds_j_y, bounds_j_x in tqdm(
             pair_bounds, desc="register", leave=True
         ):
+
             def read_patch(idx, y_bounds, x_bounds):
                 return self._read_tile_region(
                     idx, slice(y_bounds[0], y_bounds[1]), slice(x_bounds[0], x_bounds[1])
@@ -765,10 +769,9 @@ class TileFusion:
             if inp is not None:
                 del inp
             prev = omezarr_path / f"scale{idx}" / "image"
-            inp = ts.open({
-                "driver": "zarr3",
-                "kvstore": {"driver": "file", "path": str(prev)}
-            }).result()
+            inp = ts.open(
+                {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(prev)}}
+            ).result()
 
             factor_to_use = factors[idx] // factors[idx - 1] if idx > 0 else factors[0]
             _, _, Y, X = inp.shape
@@ -804,7 +807,7 @@ class TileFusion:
                             else np.asarray(down_arr)
                         )
                     down = down.astype(slab.dtype, copy=False)
-                    self.fused_ts[:, :, y0:y0 + by, x0:x0 + bx].write(down).result()
+                    self.fused_ts[:, :, y0 : y0 + by, x0 : x0 + bx].write(down).result()
 
             write_scale_group_metadata(omezarr_path / f"scale{idx + 1}")
 
@@ -877,6 +880,8 @@ class TileFusion:
 
         print("Building multiscale pyramid...")
         self._create_multiscales(self.output_path, factors=self.multiscale_factors)
-        self._generate_ngff_zarr3_json(self.output_path, resolution_multiples=self.resolution_multiples)
+        self._generate_ngff_zarr3_json(
+            self.output_path, resolution_multiples=self.resolution_multiples
+        )
 
         print(f"Done! Output: {self.output_path}")

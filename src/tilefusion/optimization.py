@@ -9,9 +9,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 
 
-def solve_global(
-    links: List[Dict[str, Any]], n_tiles: int, fixed_indices: List[int]
-) -> np.ndarray:
+def solve_global(links: List[Dict[str, Any]], n_tiles: int, fixed_indices: List[int]) -> np.ndarray:
     """
     Solve a linear least-squares for all 2 axes at once,
     given weighted pairwise links and fixed tile indices.
@@ -121,7 +119,7 @@ def two_round_optimization(
 
 
 def links_from_pairwise_metrics(
-    pairwise_metrics: Dict[Tuple[int, int], Tuple[int, int, float]]
+    pairwise_metrics: Dict[Tuple[int, int], Tuple[int, int, float]],
 ) -> List[Dict[str, Any]]:
     """
     Convert pairwise_metrics dict to list of link dicts.
@@ -138,10 +136,12 @@ def links_from_pairwise_metrics(
     """
     links = []
     for (i, j), v in pairwise_metrics.items():
-        links.append({
-            "i": i,
-            "j": j,
-            "t": np.array(v[:2], dtype=np.float64),
-            "w": np.sqrt(v[2]),
-        })
+        links.append(
+            {
+                "i": i,
+                "j": j,
+                "t": np.array(v[:2], dtype=np.float64),
+                "w": np.sqrt(v[2]),
+            }
+        )
     return links
