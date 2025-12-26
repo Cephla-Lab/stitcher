@@ -1142,29 +1142,23 @@ class TileFusion:
             del output
         else:
             print(f"Direct mode: writing directly to disk (output {output_bytes / 1e9:.2f} GB)")
-            # Process channel by channel to reduce memory
-            for c in range(self.channels):
-                channel_buf = np.zeros((1, 1, pad_Y, pad_X), dtype=np.uint16)
+            # Write each tile directly to output (read each tile once)
+            for t_idx in trange(len(offsets), desc="placing tiles", leave=True):
+                oy, ox = offsets[t_idx]
+                tile_all = self._read_tile(t_idx)  # Read once
 
-                for t_idx in trange(len(offsets), desc=f"ch{c} placing", leave=True):
-                    oy, ox = offsets[t_idx]
-                    tile_all = self._read_tile(t_idx)
+                # Calculate valid output region
+                y_end = min(oy + self.Y, pad_Y)
+                x_end = min(ox + self.X, pad_X)
+                tile_h = y_end - oy
+                tile_w = x_end - ox
 
-                    if tile_all.shape[0] > 1:
-                        tile = tile_all[c : c + 1]
-                    else:
-                        tile = tile_all
-
-                    y_end = min(oy + self.Y, pad_Y)
-                    x_end = min(ox + self.X, pad_X)
-                    tile_h = y_end - oy
-                    tile_w = x_end - ox
-
-                    if tile_h > 0 and tile_w > 0:
-                        channel_buf[0, 0, oy:y_end, ox:x_end] = tile[0, :tile_h, :tile_w]
-
-                self.fused_ts[0, c : c + 1, :, :].write(channel_buf).result()
-                del channel_buf
+                if tile_h > 0 and tile_w > 0:
+                    # Write all channels for this tile region
+                    tile_region = tile_all[:, :tile_h, :tile_w].astype(np.uint16)
+                    self.fused_ts[0:1, :, oy:y_end, ox:x_end].write(
+                        tile_region[np.newaxis, ...]
+                    ).result()
 
         gc.collect()
 
