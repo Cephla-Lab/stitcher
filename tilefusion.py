@@ -1178,37 +1178,36 @@ class TileFusion:
             for (y, x) in self._tile_positions
         ]
         pad_Y, pad_X = self.padded_shape
+        C = self.channels
 
-        for c in range(self.channels):
-            fused_block = np.zeros((1, pad_Y, pad_X), dtype=np.float32)
-            weight_sum = np.zeros_like(fused_block)
+        # Allocate multi-channel accumulators
+        fused_block = np.zeros((C, pad_Y, pad_X), dtype=np.float32)
+        weight_sum = np.zeros_like(fused_block)
 
-            for t_idx in trange(len(offsets), desc="fusing", leave=True):
-                oy, ox = offsets[t_idx]
-                tile_all = self._read_tile(t_idx)
+        # Pre-compute weight profile
+        w2d = self.y_profile[:, None] * self.x_profile[None, :]
 
-                # Extract the current channel
-                if tile_all.shape[0] > 1:
-                    tile = tile_all[c : c + 1, :, :]  # (1, Y, X)
-                else:
-                    tile = tile_all  # Single channel, use as-is
+        # Process each tile once, accumulate all channels
+        for t_idx in trange(len(offsets), desc="fusing", leave=True):
+            oy, ox = offsets[t_idx]
+            tile_all = self._read_tile(t_idx)  # (C, Y, X)
 
-                wy = self.y_profile
-                wx = self.x_profile
-                w2d = wy[:, None] * wx[None, :]
+            # Ensure tile has correct number of channels
+            if tile_all.shape[0] == 1 and C > 1:
+                tile_all = np.broadcast_to(tile_all, (C, tile_all.shape[1], tile_all.shape[2]))
 
-                _accumulate_tile_shard(fused_block, weight_sum, tile, w2d, oy, ox)
+            _accumulate_tile_shard(fused_block, weight_sum, tile_all, w2d, oy, ox)
 
-            _normalize_shard(fused_block, weight_sum)
-            self.fused_ts[0, slice(c, c + 1), slice(0, pad_Y), slice(0, pad_X)].write(
-                fused_block.astype(np.uint16)
-            ).result()
+        _normalize_shard(fused_block, weight_sum)
 
-            del fused_block, weight_sum
-            gc.collect()
-            if USING_GPU and cp is not None:
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
+        # Write all channels at once
+        self.fused_ts[0, :, :pad_Y, :pad_X].write(fused_block.astype(np.uint16)).result()
+
+        del fused_block, weight_sum
+        gc.collect()
+        if USING_GPU and cp is not None:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
 
     def _fuse_tiles_chunked(self, ram_fraction: float = 0.4) -> None:
         """Fuse tiles using memory-efficient super-chunk processing.
@@ -1224,8 +1223,8 @@ class TileFusion:
         available_ram = psutil.virtual_memory().available
         usable_ram = int(available_ram * ram_fraction)
 
-        # Need 2 float32 arrays (fused_block + weight_sum)
-        bytes_per_pixel = 4 * 2  # float32 × 2 arrays
+        # Need 2 float32 arrays per channel (fused_block + weight_sum)
+        bytes_per_pixel = 4 * 2 * self.channels  # float32 × 2 arrays × channels
         max_pixels = usable_ram // bytes_per_pixel
         block_size = int(np.sqrt(max_pixels))
 
@@ -1262,71 +1261,77 @@ class TileFusion:
         n_blocks_y = (pad_Y + block_size - 1) // block_size
         n_blocks_x = (pad_X + block_size - 1) // block_size
         total_blocks = n_blocks_y * n_blocks_x
+        C = self.channels
 
-        # Process each channel
-        for c in range(self.channels):
-            block_idx = 0
-            for block_y in range(0, pad_Y, block_size):
-                for block_x in range(0, pad_X, block_size):
-                    block_idx += 1
-                    by_end = min(block_y + block_size, pad_Y)
-                    bx_end = min(block_x + block_size, pad_X)
-                    bh, bw = by_end - block_y, bx_end - block_x
+        # Process blocks (all channels at once per block)
+        block_idx = 0
+        for block_y in range(0, pad_Y, block_size):
+            for block_x in range(0, pad_X, block_size):
+                block_idx += 1
+                by_end = min(block_y + block_size, pad_Y)
+                bx_end = min(block_x + block_size, pad_X)
+                bh, bw = by_end - block_y, bx_end - block_x
 
-                    # Find overlapping tiles
-                    overlapping = []
-                    for t_idx, (ty0, ty1, tx0, tx1) in enumerate(tile_bounds):
-                        if ty1 > block_y and ty0 < by_end and tx1 > block_x and tx0 < bx_end:
-                            overlapping.append(t_idx)
+                # Find overlapping tiles
+                overlapping = []
+                for t_idx, (ty0, ty1, tx0, tx1) in enumerate(tile_bounds):
+                    if ty1 > block_y and ty0 < by_end and tx1 > block_x and tx0 < bx_end:
+                        overlapping.append(t_idx)
 
-                    if not overlapping:
-                        continue  # Empty block
+                if not overlapping:
+                    continue  # Empty block
 
-                    # Allocate block accumulator
-                    fused_block = np.zeros((1, bh, bw), dtype=np.float32)
-                    weight_sum = np.zeros_like(fused_block)
+                # Allocate multi-channel block accumulator
+                fused_block = np.zeros((C, bh, bw), dtype=np.float32)
+                weight_sum = np.zeros_like(fused_block)
 
-                    # Accumulate overlapping tiles
-                    desc = f"ch{c} block {block_idx}/{total_blocks}"
-                    for t_idx in tqdm(overlapping, desc=desc, leave=False):
-                        tile_all = self._read_tile(t_idx)
-                        tile = tile_all[c : c + 1] if tile_all.shape[0] > 1 else tile_all
+                # Accumulate overlapping tiles (read each tile once for all channels)
+                desc = f"block {block_idx}/{total_blocks}"
+                for t_idx in tqdm(overlapping, desc=desc, leave=False):
+                    tile_all = self._read_tile(t_idx)  # Read once
 
-                        ty0, ty1, tx0, tx1 = tile_bounds[t_idx]
+                    # Ensure tile has correct number of channels
+                    if tile_all.shape[0] == 1 and C > 1:
+                        tile_all = np.broadcast_to(
+                            tile_all, (C, tile_all.shape[1], tile_all.shape[2])
+                        )
 
-                        # Compute overlap region in block coordinates
-                        oy0 = max(ty0, block_y) - block_y
-                        oy1 = min(ty1, by_end) - block_y
-                        ox0 = max(tx0, block_x) - block_x
-                        ox1 = min(tx1, bx_end) - block_x
+                    ty0, ty1, tx0, tx1 = tile_bounds[t_idx]
 
-                        # Source region in tile coordinates
-                        sy0 = max(block_y - ty0, 0)
-                        sy1 = sy0 + (oy1 - oy0)
-                        sx0 = max(block_x - tx0, 0)
-                        sx1 = sx0 + (ox1 - ox0)
+                    # Compute overlap region in block coordinates
+                    oy0 = max(ty0, block_y) - block_y
+                    oy1 = min(ty1, by_end) - block_y
+                    ox0 = max(tx0, block_x) - block_x
+                    ox1 = min(tx1, bx_end) - block_x
 
-                        # Get weight for this region
-                        w2d = self.y_profile[sy0:sy1, None] * self.x_profile[None, sx0:sx1]
+                    # Source region in tile coordinates
+                    sy0 = max(block_y - ty0, 0)
+                    sy1 = sy0 + (oy1 - oy0)
+                    sx0 = max(block_x - tx0, 0)
+                    sx1 = sx0 + (ox1 - ox0)
 
-                        # Accumulate
-                        fused_block[0, oy0:oy1, ox0:ox1] += tile[0, sy0:sy1, sx0:sx1] * w2d
-                        weight_sum[0, oy0:oy1, ox0:ox1] += w2d
+                    # Get weight for this region
+                    w2d = self.y_profile[sy0:sy1, None] * self.x_profile[None, sx0:sx1]
 
-                    # Normalize and write
-                    mask = weight_sum > 0
-                    fused_block[mask] /= weight_sum[mask]
+                    # Accumulate all channels at once
+                    for c in range(C):
+                        fused_block[c, oy0:oy1, ox0:ox1] += tile_all[c, sy0:sy1, sx0:sx1] * w2d
+                        weight_sum[c, oy0:oy1, ox0:ox1] += w2d
 
-                    self.fused_ts[0, c : c + 1, block_y:by_end, block_x:bx_end].write(
-                        fused_block.astype(np.uint16)
-                    ).result()
+                # Normalize and write all channels
+                mask = weight_sum > 0
+                fused_block[mask] /= weight_sum[mask]
 
-                    del fused_block, weight_sum
+                self.fused_ts[0, :, block_y:by_end, block_x:bx_end].write(
+                    fused_block.astype(np.uint16)
+                ).result()
 
-            gc.collect()
-            if USING_GPU and cp is not None:
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
+                del fused_block, weight_sum
+
+        gc.collect()
+        if USING_GPU and cp is not None:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
 
     def _create_multiscales(
         self,
