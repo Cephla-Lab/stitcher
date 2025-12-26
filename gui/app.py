@@ -973,6 +973,52 @@ class StitcherGUI(QMainWindow):
 
             channel_colors = ["blue", "green", "yellow", "red", "magenta", "cyan"]
 
+            def auto_contrast(data, pmax=99.9):
+                """Compute contrast limits optimized for fluorescence microscopy.
+                
+                Uses mode-based background detection: finds the histogram peak
+                (background) and sets minimum above it. This effectively
+                suppresses background while preserving signal.
+                """
+                # Estimate background using histogram mode
+                # Sample data for speed if large
+                flat = data.ravel()
+                if len(flat) > 100000:
+                    flat = np.random.choice(flat, 100000, replace=False)
+                
+                # Find histogram peak (mode) - this is the background
+                hist, bin_edges = np.histogram(flat, bins=256)
+                mode_idx = np.argmax(hist)
+                mode_val = (bin_edges[mode_idx] + bin_edges[mode_idx + 1]) / 2
+                
+                # Estimate background noise (std of values below median)
+                background_pixels = flat[flat <= np.median(flat)]
+                if len(background_pixels) > 0:
+                    bg_std = np.std(background_pixels)
+                else:
+                    bg_std = mode_val * 0.1
+                
+                # Set min to mode + 2*std (above background noise)
+                lo = mode_val + 2 * bg_std
+                hi = np.percentile(data, pmax)
+                
+                # Ensure minimum range
+                if hi - lo < 10:
+                    hi = lo + 100
+                return [float(lo), float(hi)]
+
+            def dtype_range(dtype):
+                """Get valid range for a numpy dtype."""
+                if np.issubdtype(dtype, np.integer):
+                    info = np.iinfo(dtype)
+                    return [info.min, info.max]
+                elif np.issubdtype(dtype, np.floating):
+                    return [0.0, 1.0]
+                return [0, 65535]
+
+            # Use lowest resolution level for fast auto-contrast computation
+            lowest_res = pyramid_data[-1]
+
             if n_channels > 1:
                 for c in range(n_channels):
                     # Read channel data from each pyramid level
@@ -981,18 +1027,23 @@ class StitcherGUI(QMainWindow):
                         data = store[0, c, :, :].read().result()
                         channel_pyramid.append(np.asarray(data))
 
+                    # Auto-contrast from lowest res level
+                    contrast = auto_contrast(channel_pyramid[-1])
+
                     name = (
                         channel_names[c]
                         if channel_names and c < len(channel_names)
                         else f"Channel {c}"
                     )
-                    viewer.add_image(
+                    layer = viewer.add_image(
                         channel_pyramid,
                         multiscale=True,
                         name=name,
                         colormap=channel_colors[c % len(channel_colors)],
                         blending="additive",
+                        contrast_limits=contrast,
                     )
+                    layer.contrast_limits_range = dtype_range(channel_pyramid[-1].dtype)
             else:
                 # Single channel
                 single_pyramid = []
@@ -1000,12 +1051,15 @@ class StitcherGUI(QMainWindow):
                     data = store[0, 0, :, :].read().result()
                     single_pyramid.append(np.asarray(data))
 
-                viewer.add_image(
+                contrast = auto_contrast(single_pyramid[-1])
+
+                layer = viewer.add_image(
                     single_pyramid,
                     multiscale=True,
                     name=output_path.stem,
-                    contrast_limits=[0, 65535],
+                    contrast_limits=contrast,
                 )
+                layer.contrast_limits_range = dtype_range(single_pyramid[-1].dtype)
 
             napari.run()
         except Exception as e:
