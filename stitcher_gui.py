@@ -931,56 +931,82 @@ class StitcherGUI(QMainWindow):
 
         try:
             import napari
-            from ome_zarr.io import parse_url
-            from ome_zarr.reader import Reader
+            import tensorstore as ts
+            import numpy as np
 
-            reader = Reader(parse_url(self.output_path))
-            nodes = list(reader())
+            viewer = napari.Viewer()
+            output_path = Path(self.output_path)
 
-            if nodes:
-                data = nodes[0].data
-                viewer = napari.Viewer()
+            # Find all scale levels
+            scale_dirs = sorted(output_path.glob("scale*"))
+            pyramid_data = []
 
-                # Check number of channels from shape (t, c, y, x)
-                n_channels = data[0].shape[1] if len(data[0].shape) >= 4 else 1
+            for scale_dir in scale_dirs:
+                image_path = scale_dir / "image"
+                if image_path.exists():
+                    store = ts.open({
+                        "driver": "zarr3",
+                        "kvstore": {"driver": "file", "path": str(image_path)},
+                    }).result()
+                    pyramid_data.append(store)
 
-                if n_channels > 1:
-                    # Get channel names if available (from SQUID format)
-                    channel_names = None
-                    try:
-                        from tilefusion import TileFusion
+            if not pyramid_data:
+                self.log("No image data found in output")
+                return
 
-                        tf = TileFusion(self.drop_area.file_path)
-                        if hasattr(tf, "_squid_channels"):
-                            channel_names = [ch.replace("_", " ") for ch in tf._squid_channels]
-                    except:
-                        pass
+            # Get shape from first level: (t, c, y, x)
+            shape = pyramid_data[0].shape
+            n_channels = shape[1] if len(shape) >= 4 else 1
 
-                    # Add each channel as separate layer
-                    channel_colors = ["blue", "green", "yellow", "red", "magenta", "cyan"]
-                    for c in range(n_channels):
-                        # Extract channel from each pyramid level
-                        channel_data = [d[:, c : c + 1, :, :] for d in data]
-                        name = (
-                            channel_names[c]
-                            if channel_names and c < len(channel_names)
-                            else f"Channel {c}"
-                        )
-                        viewer.add_image(
-                            channel_data,
-                            multiscale=True,
-                            name=name,
-                            colormap=channel_colors[c % len(channel_colors)],
-                            blending="additive",
-                        )
-                else:
-                    viewer.add_image(
-                        data,
-                        multiscale=True,
-                        name=Path(self.output_path).stem,
-                        contrast_limits=[0, 65535],
+            # Get channel names if available
+            channel_names = None
+            try:
+                from tilefusion import TileFusion
+                tf = TileFusion(self.drop_area.file_path)
+                if hasattr(tf, "_squid_channels"):
+                    channel_names = [ch.replace("_", " ") for ch in tf._squid_channels]
+                elif hasattr(tf, "_zarr_channels"):
+                    channel_names = [ch.replace("_", " ") for ch in tf._zarr_channels]
+            except:
+                pass
+
+            channel_colors = ["blue", "green", "yellow", "red", "magenta", "cyan"]
+
+            if n_channels > 1:
+                for c in range(n_channels):
+                    # Read channel data from each pyramid level
+                    channel_pyramid = []
+                    for store in pyramid_data:
+                        data = store[0, c, :, :].read().result()
+                        channel_pyramid.append(np.asarray(data))
+
+                    name = (
+                        channel_names[c]
+                        if channel_names and c < len(channel_names)
+                        else f"Channel {c}"
                     )
-                napari.run()
+                    viewer.add_image(
+                        channel_pyramid,
+                        multiscale=True,
+                        name=name,
+                        colormap=channel_colors[c % len(channel_colors)],
+                        blending="additive",
+                    )
+            else:
+                # Single channel
+                single_pyramid = []
+                for store in pyramid_data:
+                    data = store[0, 0, :, :].read().result()
+                    single_pyramid.append(np.asarray(data))
+
+                viewer.add_image(
+                    single_pyramid,
+                    multiscale=True,
+                    name=output_path.stem,
+                    contrast_limits=[0, 65535],
+                )
+
+            napari.run()
         except Exception as e:
             self.log(f"Error opening Napari: {e}")
 
