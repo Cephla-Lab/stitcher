@@ -52,7 +52,7 @@ class TestLoadIndividualTiffsMetadata:
         assert meta["shape"] == (100, 100)
         assert meta["channels"] == 2
         assert len(meta["tile_positions"]) == 4
-        assert len(meta["fov_indices"]) == 4
+        assert len(meta["tile_identifiers"]) == 4
 
     def test_tile_positions(self, sample_tiff_folder):
         """Test that tile positions are converted correctly."""
@@ -85,20 +85,21 @@ class TestReadIndividualTiffsTile:
                 img = np.full((50, 50), fill_value=(fov + 1) * (idx + 1) * 100, dtype=np.uint16)
                 tifffile.imwrite(img_folder / f"manual_{fov}_0_{ch}.tiff", img)
 
-        return img_folder, ["ch1", "ch2"], [0, 1]
+        # tile_identifiers are tuples: (fov,) for manual format
+        return img_folder, ["ch1", "ch2"], [(0,), (1,)]
 
     def test_reads_all_channels(self, sample_tiff_folder):
         """Test that all channels are read."""
-        img_folder, channel_names, fov_indices = sample_tiff_folder
-        tile = read_individual_tiffs_tile(img_folder, channel_names, fov_indices, tile_idx=0)
+        img_folder, channel_names, tile_identifiers = sample_tiff_folder
+        tile = read_individual_tiffs_tile(img_folder, channel_names, tile_identifiers, tile_idx=0)
 
         assert tile.shape == (2, 50, 50)
         assert tile.dtype == np.float32
 
     def test_correct_values(self, sample_tiff_folder):
         """Test that values are read correctly."""
-        img_folder, channel_names, fov_indices = sample_tiff_folder
-        tile = read_individual_tiffs_tile(img_folder, channel_names, fov_indices, tile_idx=0)
+        img_folder, channel_names, tile_identifiers = sample_tiff_folder
+        tile = read_individual_tiffs_tile(img_folder, channel_names, tile_identifiers, tile_idx=0)
 
         # FOV 0: ch1 = 100, ch2 = 200
         assert np.allclose(tile[0], 100)

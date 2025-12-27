@@ -13,14 +13,35 @@ import pandas as pd
 import tifffile
 
 
+def _detect_filename_pattern(image_folder: Path, tiff_files: list):
+    """
+    Detect the filename pattern used in the folder.
+
+    Returns pattern type and relevant info:
+    - 'manual': manual_{fov}_{z}_{channel}.tiff
+    - 'region': {region}_{fov}_{z}_{channel}.tiff (e.g., C7_0_0_..., current_0_0_...)
+    """
+    for f in tiff_files:
+        stem = f.stem
+        if stem.startswith("manual_"):
+            return "manual", None
+        # Check for region pattern: {region}_{fov}_{z}_{channel}
+        # region can be well ID (C4, D5) or arbitrary name (current)
+        parts = stem.split("_")
+        if len(parts) >= 4:
+            # Second part should be numeric (fov index)
+            if parts[1].isdigit():
+                return "region", None
+    return "manual", None
+
+
 def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
     """
     Load metadata from individual TIFFs folder format.
 
-    Expected structure:
-    - Individual TIFF files: manual_{fov}_{z}_{channel}.tiff
-    - coordinates.csv with fov, x (mm), y (mm)
-    - Optional: acquisition parameters.json
+    Supports two naming conventions:
+    - manual_{fov}_{z}_{channel}.tiff with fov column in coordinates.csv
+    - {well}_{fov}_{z}_{channel}.tiff with region column in coordinates.csv
 
     Parameters
     ----------
@@ -37,14 +58,18 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
         - channel_names: list of str
         - pixel_size: (py, px)
         - tile_positions: list of (y, x) tuples
-        - fov_indices: list of int
+        - tile_identifiers: list of (well, fov) or (fov,) tuples
         - image_folder: Path
     """
     # Find the subfolder containing images (usually "0" for single z-level)
-    subfolders = [d for d in folder_path.iterdir() if d.is_dir()]
-    if subfolders:
-        image_folder = subfolders[0]
-    else:
+    subfolders = [d for d in folder_path.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    # Filter to only directories that contain tiff files
+    image_folder = None
+    for sub in subfolders:
+        if list(sub.glob("*.tiff")) or list(sub.glob("*.tif")):
+            image_folder = sub
+            break
+    if image_folder is None:
         image_folder = folder_path
 
     # Load coordinates
@@ -62,6 +87,9 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
     if not tiff_files:
         tiff_files = list(image_folder.glob("*.tif"))
 
+    # Detect filename pattern
+    pattern, _ = _detect_filename_pattern(image_folder, tiff_files)
+
     channel_names = set()
     for f in tiff_files:
         parts = f.stem.split("_")
@@ -72,12 +100,44 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
     channel_names = sorted(channel_names)
     channels = len(channel_names)
 
-    # Read first image to get dimensions
-    first_fov = coords["fov"].iloc[0]
-    first_channel = channel_names[0]
-    first_img_path = image_folder / f"manual_{first_fov}_0_{first_channel}.tiff"
+    # Determine tile identifiers based on coords columns and pattern
+    if "region" in coords.columns and "fov" in coords.columns:
+        # Region+fov format: {region}_{fov}_{z}_{channel}.tiff
+        # Use the actual fov values from the CSV
+        tile_identifiers = []
+        for _, row in coords.iterrows():
+            region = row["region"]
+            fov = row["fov"]
+            tile_identifiers.append((region, fov))
+        first_region, first_fov = tile_identifiers[0]
+        first_channel = channel_names[0]
+        first_img_path = image_folder / f"{first_region}_{first_fov}_0_{first_channel}.tiff"
+    elif "region" in coords.columns:
+        # Region-only format: {region}_{fov}_{z}_{channel}.tiff (fov is sequential within region)
+        region_fov_counts = {}
+        tile_identifiers = []
+        for _, row in coords.iterrows():
+            region = row["region"]
+            fov_in_region = region_fov_counts.get(region, 0)
+            tile_identifiers.append((region, fov_in_region))
+            region_fov_counts[region] = fov_in_region + 1
+        first_region, first_fov = tile_identifiers[0]
+        first_channel = channel_names[0]
+        first_img_path = image_folder / f"{first_region}_{first_fov}_0_{first_channel}.tiff"
+    elif "fov" in coords.columns:
+        # Manual format: manual_{fov}_{z}_{channel}.tiff
+        tile_identifiers = [(fov,) for fov in coords["fov"].tolist()]
+        first_fov = coords["fov"].iloc[0]
+        first_channel = channel_names[0]
+        first_img_path = image_folder / f"manual_{first_fov}_0_{first_channel}.tiff"
+    else:
+        # Fallback: assume sequential FOVs
+        tile_identifiers = [(i,) for i in range(n_tiles)]
+        first_channel = channel_names[0]
+        first_img_path = image_folder / f"manual_0_0_{first_channel}.tiff"
+
     if not first_img_path.exists():
-        first_img_path = image_folder / f"manual_{first_fov}_0_{first_channel}.tif"
+        first_img_path = first_img_path.with_suffix(".tif")
 
     first_img = tifffile.imread(first_img_path)
     Y, X = first_img.shape[-2:]
@@ -102,8 +162,6 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
         y_um = row["y (mm)"] * 1000
         tile_positions.append((y_um, x_um))
 
-    fov_indices = coords["fov"].tolist()
-
     return {
         "n_tiles": n_tiles,
         "n_series": n_tiles,
@@ -114,15 +172,32 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
         "position_dim": n_tiles,
         "pixel_size": pixel_size,
         "tile_positions": tile_positions,
-        "fov_indices": fov_indices,
+        "tile_identifiers": tile_identifiers,
         "image_folder": image_folder,
+        "pattern": pattern,
     }
+
+
+def _get_tile_filename(image_folder: Path, tile_id: tuple, channel_name: str) -> Path:
+    """Get the TIFF filename for a tile based on its identifier."""
+    if len(tile_id) == 2:
+        # Region-based format: (region, fov)
+        region, fov = tile_id
+        img_path = image_folder / f"{region}_{fov}_0_{channel_name}.tiff"
+    else:
+        # Manual format: (fov,)
+        fov = tile_id[0]
+        img_path = image_folder / f"manual_{fov}_0_{channel_name}.tiff"
+
+    if not img_path.exists():
+        img_path = img_path.with_suffix(".tif")
+    return img_path
 
 
 def read_individual_tiffs_tile(
     image_folder: Path,
     channel_names: List[str],
-    fov_indices: List[int],
+    tile_identifiers: List[tuple],
     tile_idx: int,
 ) -> np.ndarray:
     """
@@ -134,8 +209,8 @@ def read_individual_tiffs_tile(
         Path to folder containing TIFF files.
     channel_names : list of str
         Channel names.
-    fov_indices : list of int
-        FOV indices for each tile.
+    tile_identifiers : list of tuple
+        Tile identifiers: (well, fov) or (fov,) tuples.
     tile_idx : int
         Index of the tile.
 
@@ -144,13 +219,11 @@ def read_individual_tiffs_tile(
     arr : ndarray of shape (C, Y, X)
         Tile data as float32.
     """
-    fov = fov_indices[tile_idx]
+    tile_id = tile_identifiers[tile_idx]
 
     channels = []
     for channel_name in channel_names:
-        img_path = image_folder / f"manual_{fov}_0_{channel_name}.tiff"
-        if not img_path.exists():
-            img_path = image_folder / f"manual_{fov}_0_{channel_name}.tif"
+        img_path = _get_tile_filename(image_folder, tile_id, channel_name)
         arr = tifffile.imread(img_path)
         channels.append(arr)
 
@@ -161,7 +234,7 @@ def read_individual_tiffs_tile(
 def read_individual_tiffs_region(
     image_folder: Path,
     channel_names: List[str],
-    fov_indices: List[int],
+    tile_identifiers: List[tuple],
     tile_idx: int,
     y_slice: slice,
     x_slice: slice,
@@ -176,8 +249,8 @@ def read_individual_tiffs_region(
         Path to folder containing TIFF files.
     channel_names : list of str
         Channel names.
-    fov_indices : list of int
-        FOV indices for each tile.
+    tile_identifiers : list of tuple
+        Tile identifiers: (well, fov) or (fov,) tuples.
     tile_idx : int
         Index of the tile.
     y_slice, x_slice : slice
@@ -190,12 +263,10 @@ def read_individual_tiffs_region(
     arr : ndarray of shape (1, h, w)
         Tile region as float32.
     """
-    fov = fov_indices[tile_idx]
+    tile_id = tile_identifiers[tile_idx]
     channel_name = channel_names[channel_idx]
 
-    img_path = image_folder / f"manual_{fov}_0_{channel_name}.tiff"
-    if not img_path.exists():
-        img_path = image_folder / f"manual_{fov}_0_{channel_name}.tif"
+    img_path = _get_tile_filename(image_folder, tile_id, channel_name)
 
     arr = tifffile.imread(img_path)
     if arr.ndim == 2:

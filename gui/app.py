@@ -967,10 +967,8 @@ class StitcherGUI(QMainWindow):
                 from tilefusion import TileFusion
 
                 tf = TileFusion(self.drop_area.file_path)
-                if hasattr(tf, "_squid_channels"):
-                    channel_names = [ch.replace("_", " ") for ch in tf._squid_channels]
-                elif hasattr(tf, "_zarr_channels"):
-                    channel_names = [ch.replace("_", " ") for ch in tf._zarr_channels]
+                if "channel_names" in tf._metadata:
+                    channel_names = [ch.replace("_", " ") for ch in tf._metadata["channel_names"]]
             except:
                 pass
 

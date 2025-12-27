@@ -258,7 +258,7 @@ class TileFusion:
             return read_individual_tiffs_tile(
                 self._metadata["image_folder"],
                 self._metadata["channel_names"],
-                self._metadata["fov_indices"],
+                self._metadata["tile_identifiers"],
                 tile_idx,
             )
         else:
@@ -279,7 +279,7 @@ class TileFusion:
             return read_individual_tiffs_region(
                 self._metadata["image_folder"],
                 self._metadata["channel_names"],
-                self._metadata["fov_indices"],
+                self._metadata["tile_identifiers"],
                 tile_idx,
                 y_slice,
                 x_slice,
