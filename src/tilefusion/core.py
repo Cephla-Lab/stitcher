@@ -25,6 +25,7 @@ from .utils import (
 from .registration import (
     compute_pair_bounds,
     find_adjacent_pairs,
+    find_adjacent_pairs_fast,
     register_and_score,
     register_pair_worker,
 )
@@ -46,7 +47,9 @@ from .io import (
     create_zarr_store,
     write_ngff_metadata,
     write_scale_group_metadata,
+    OMETiffReader,
 )
+from .cache import TileCache
 
 
 class TileFusion:
@@ -388,10 +391,16 @@ class TileFusion:
 
         max_shift = (100, 100)
 
-        # Find adjacent pairs
-        adjacent_pairs = find_adjacent_pairs(
-            self._tile_positions, self._pixel_size, (self.Y, self.X)
-        )
+        # Use fast spatial hashing for large datasets (>100 tiles)
+        n_tiles = len(self._tile_positions)
+        if n_tiles > 100:
+            adjacent_pairs = find_adjacent_pairs_fast(
+                self._tile_positions, self._pixel_size, (self.Y, self.X)
+            )
+        else:
+            adjacent_pairs = find_adjacent_pairs(
+                self._tile_positions, self._pixel_size, (self.Y, self.X)
+            )
 
         if self._debug:
             print(f"Found {len(adjacent_pairs)} adjacent tile pairs to register")
@@ -402,7 +411,16 @@ class TileFusion:
         # Use parallel processing for CPU mode
         use_parallel = parallel and not USING_GPU and len(pair_bounds) > 4
 
-        if use_parallel:
+        # Use optimized path for OME-TIFF multi-series format (persistent file handle + cache)
+        is_ome_tiff_multi = (
+            not self._is_zarr_format
+            and not self._is_individual_tiffs_format
+            and not self._is_ome_tiff_tiles_format
+        )
+
+        if use_parallel and is_ome_tiff_multi and n_tiles > 50:
+            self._register_parallel_optimized(pair_bounds, df, sw, th, max_shift)
+        elif use_parallel:
             self._register_parallel(pair_bounds, df, sw, th, max_shift)
         else:
             self._register_sequential(pair_bounds, df, sw, th, max_shift)
@@ -472,6 +490,90 @@ class TileFusion:
 
             del patches, work_items, results
             gc.collect()
+
+    def _register_parallel_optimized(
+        self,
+        pair_bounds: List[Tuple],
+        df: Tuple[int, int],
+        sw: int,
+        th: float,
+        max_shift: Tuple[int, int],
+    ) -> None:
+        """Register tile pairs using persistent file handle and caching (OME-TIFF only)."""
+        import psutil
+
+        available_ram = psutil.virtual_memory().available
+        patch_size_est = self.Y * self.X * 4 * 2
+        max_pairs_in_memory = int(available_ram * 0.3 / patch_size_est)
+        batch_size = max(16, max_pairs_in_memory)
+
+        n_pairs = len(pair_bounds)
+        n_batches = (n_pairs + batch_size - 1) // batch_size
+        n_workers = min(cpu_count(), batch_size, 8)
+
+        # Estimate cache size: enough for tiles that appear in multiple pairs
+        cache_size = min(256, len(self._tile_positions) * 2)
+
+        if n_batches > 1:
+            print(f"Processing {n_pairs} pairs in {n_batches} batches (optimized)")
+
+        with OMETiffReader(self.tiff_path) as reader:
+            cache = TileCache(maxsize=cache_size)
+
+            def read_pair_patches_cached(args):
+                i_pos, j_pos, bounds_i_y, bounds_i_x, bounds_j_y, bounds_j_x = args
+                try:
+                    patch_i = cache.get(
+                        reader,
+                        i_pos,
+                        slice(bounds_i_y[0], bounds_i_y[1]),
+                        slice(bounds_i_x[0], bounds_i_x[1]),
+                    )
+                    patch_j = cache.get(
+                        reader,
+                        j_pos,
+                        slice(bounds_j_y[0], bounds_j_y[1]),
+                        slice(bounds_j_x[0], bounds_j_x[1]),
+                    )
+                    return (i_pos, j_pos, patch_i, patch_j)
+                except Exception:
+                    return (i_pos, j_pos, None, None)
+
+            for batch_idx in range(n_batches):
+                start = batch_idx * batch_size
+                end = min(start + batch_size, n_pairs)
+                batch = pair_bounds[start:end]
+
+                # Read patches (single-threaded since file handle is shared)
+                patches = [read_pair_patches_cached(args) for args in batch]
+
+                work_items = [
+                    (i, j, pi, pj, df, sw, th, max_shift)
+                    for i, j, pi, pj in patches
+                    if pi is not None
+                ]
+
+                desc = f"register {batch_idx+1}/{n_batches}" if n_batches > 1 else "register"
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                    results = list(
+                        tqdm(
+                            executor.map(register_pair_worker, work_items),
+                            total=len(work_items),
+                            desc=desc,
+                            leave=True,
+                        )
+                    )
+
+                for i_pos, j_pos, dy_s, dx_s, score in results:
+                    if dy_s is not None:
+                        self.pairwise_metrics[(i_pos, j_pos)] = (dy_s, dx_s, score)
+
+                del patches, work_items, results
+                gc.collect()
+
+            if self._debug:
+                print(f"Cache stats: {cache.hits} hits, {cache.misses} misses, "
+                      f"hit rate: {cache.hit_rate:.1%}")
 
     def _register_sequential(
         self,

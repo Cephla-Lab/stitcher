@@ -4,7 +4,8 @@ Tile registration algorithms.
 Phase cross-correlation based registration with SSIM scoring.
 """
 
-from typing import Any, Tuple, Union
+from collections import defaultdict
+from typing import Any, List, Tuple, Union
 
 import numpy as np
 
@@ -164,6 +165,94 @@ def find_adjacent_pairs(tile_positions, pixel_size, tile_shape, min_overlap=15):
 
             if is_horizontal_neighbor or is_vertical_neighbor:
                 adjacent_pairs.append((i_pos, j_pos, dy, dx, overlap_y, overlap_x))
+
+    return adjacent_pairs
+
+
+def find_adjacent_pairs_fast(
+    tile_positions: List[Tuple[float, float]],
+    pixel_size: Tuple[float, float],
+    tile_shape: Tuple[int, int],
+    min_overlap: int = 15,
+) -> List[Tuple[int, int, int, int, int, int]]:
+    """
+    Find adjacent tile pairs using spatial hashing (O(n) instead of O(n²)).
+
+    Uses grid-based spatial hashing to only compare tiles in nearby cells,
+    dramatically reducing comparisons for large datasets.
+
+    Parameters
+    ----------
+    tile_positions : list of (y, x) tuples
+        Stage positions for each tile in physical units.
+    pixel_size : tuple of (py, px)
+        Pixel size in physical units.
+    tile_shape : tuple of (Y, X)
+        Tile dimensions in pixels.
+    min_overlap : int
+        Minimum overlap in pixels.
+
+    Returns
+    -------
+    adjacent_pairs : list of tuples
+        Each tuple: (i_pos, j_pos, dy, dx, overlap_y, overlap_x)
+    """
+    n_pos = len(tile_positions)
+    if n_pos == 0:
+        return []
+
+    Y, X = tile_shape
+    py, px = pixel_size
+
+    # Cell size is tile size in physical units
+    cell_y = Y * py
+    cell_x = X * px
+
+    # Build spatial hash: (cell_y, cell_x) -> list of tile indices
+    grid: defaultdict = defaultdict(list)
+    for i, (y, x) in enumerate(tile_positions):
+        cy = int(y / cell_y)
+        cx = int(x / cell_x)
+        grid[(cy, cx)].append(i)
+
+    # Check only tiles in same or adjacent cells
+    adjacent_pairs = []
+    checked = set()
+
+    for (cy, cx), tiles_in_cell in grid.items():
+        # Gather all tiles in 3x3 neighborhood
+        neighborhood = []
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                neighborhood.extend(grid.get((cy + dy, cx + dx), []))
+
+        # Check pairs between tiles in this cell and neighborhood
+        for i_pos in tiles_in_cell:
+            for j_pos in neighborhood:
+                # Ensure i < j and not already checked
+                if i_pos >= j_pos:
+                    continue
+                pair_key = (i_pos, j_pos)
+                if pair_key in checked:
+                    continue
+                checked.add(pair_key)
+
+                # Compute offset in pixels
+                phys = np.array(tile_positions[j_pos]) - np.array(tile_positions[i_pos])
+                vox_off = np.round(phys / np.array(pixel_size)).astype(int)
+                dy_px, dx_px = vox_off
+
+                overlap_y = Y - abs(dy_px)
+                overlap_x = X - abs(dx_px)
+
+                # Check if tiles are adjacent
+                is_horizontal_neighbor = abs(dy_px) < min_overlap and overlap_x >= min_overlap
+                is_vertical_neighbor = abs(dx_px) < min_overlap and overlap_y >= min_overlap
+
+                if is_horizontal_neighbor or is_vertical_neighbor:
+                    adjacent_pairs.append(
+                        (i_pos, j_pos, dy_px, dx_px, overlap_y, overlap_x)
+                    )
 
     return adjacent_pairs
 

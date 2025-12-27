@@ -2,7 +2,7 @@
 I/O modules for different microscopy file formats.
 """
 
-from .ome_tiff import load_ome_tiff_metadata, read_ome_tiff_tile, read_ome_tiff_region
+from .ome_tiff import load_ome_tiff_metadata, read_ome_tiff_tile, read_ome_tiff_region, OMETiffReader
 from .individual_tiffs import (
     load_individual_tiffs_metadata,
     read_individual_tiffs_tile,
@@ -26,6 +26,7 @@ __all__ = [
     "load_ome_tiff_metadata",
     "read_ome_tiff_tile",
     "read_ome_tiff_region",
+    "OMETiffReader",
     "load_individual_tiffs_metadata",
     "read_individual_tiffs_tile",
     "read_individual_tiffs_region",

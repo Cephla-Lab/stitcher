@@ -133,3 +133,48 @@ def read_ome_tiff_region(
     # Flip along Y axis to correct orientation
     arr = np.flip(arr, axis=-2)
     return arr[:, y_slice, x_slice].astype(np.float32)
+
+
+class OMETiffReader:
+    """
+    Persistent file handle for OME-TIFF reading.
+
+    Keeps the file open during registration to avoid repeated open/close
+    operations on large files.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._tif = None
+
+    def __enter__(self):
+        self._tif = tifffile.TiffFile(self.path)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._tif is not None:
+            self._tif.close()
+        return False
+
+    def read_region(self, tile_idx: int, y_slice: slice, x_slice: slice) -> np.ndarray:
+        """
+        Read a region of a tile using the persistent file handle.
+
+        Parameters
+        ----------
+        tile_idx : int
+            Index of the tile.
+        y_slice, x_slice : slice
+            Region to read.
+
+        Returns
+        -------
+        arr : ndarray of shape (C, h, w)
+            Tile region as float32.
+        """
+        arr = self._tif.series[tile_idx].asarray()
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, :, :]
+        # Flip along Y axis to correct orientation
+        arr = np.flip(arr, axis=-2)
+        return arr[:, y_slice, x_slice].astype(np.float32)
