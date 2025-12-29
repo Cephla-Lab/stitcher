@@ -327,14 +327,16 @@ class TestTileFusionResourceManagement:
         return path
 
     def test_close_method(self, sample_ome_tiff):
-        """Test that close() properly closes the tiff_handle."""
+        """Test that close() properly closes thread-local handles."""
         from tilefusion import TileFusion
 
         try:
             tf = TileFusion(sample_ome_tiff)
-            assert "tiff_handle" in tf._metadata
+            # Trigger handle creation by reading a tile
+            tf._read_tile(0)
+            assert len(tf._all_handles) > 0, "Handle should be created after read"
             tf.close()
-            assert "tiff_handle" not in tf._metadata
+            assert len(tf._all_handles) == 0, "Handles should be cleared after close"
         except Exception:
             pytest.skip("OME-TIFF creation requires proper OME-XML handling")
 
@@ -350,12 +352,15 @@ class TestTileFusionResourceManagement:
             pytest.skip("OME-TIFF creation requires proper OME-XML handling")
 
     def test_context_manager(self, sample_ome_tiff):
-        """Test context manager protocol."""
+        """Test context manager protocol cleans up handles on exit."""
         from tilefusion import TileFusion
 
         try:
             with TileFusion(sample_ome_tiff) as tf:
-                assert "tiff_handle" in tf._metadata
-            assert "tiff_handle" not in tf._metadata
+                # Trigger handle creation by reading a tile
+                tf._read_tile(0)
+                assert len(tf._all_handles) > 0, "Handle should be created"
+            # After exiting context, handles should be cleaned up
+            assert len(tf._all_handles) == 0, "Handles should be cleared after exit"
         except Exception:
             pytest.skip("OME-TIFF creation requires proper OME-XML handling")

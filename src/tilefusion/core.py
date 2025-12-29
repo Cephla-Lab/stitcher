@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import tensorstore as ts
+import tifffile
 from tqdm import trange, tqdm
 
 from .utils import (
@@ -225,7 +226,7 @@ class TileFusion:
         # Thread-local storage for TiffFile handles (thread-safe concurrent access)
         self._thread_local = threading.local()
         self._handles_lock = threading.Lock()
-        self._all_handles: List = []  # Track all handles for cleanup
+        self._all_handles: List[tifffile.TiffFile] = []
 
     def close(self) -> None:
         """
@@ -235,6 +236,12 @@ class TileFusion:
         or use it as a context manager (``with TileFusion(...) as tf:``)
         for automatic cleanup. Important for OME-TIFF inputs where file
         handles are kept open for performance.
+
+        Warning
+        -------
+        Only call this method when all read operations are complete. Calling
+        ``close()`` while other threads are still reading tiles will close
+        their handles mid-operation, causing errors.
         """
         # Close all thread-local handles
         with self._handles_lock:
@@ -269,10 +276,10 @@ class TileFusion:
         """
         try:
             self.close()
-        except AttributeError:
-            pass  # Object may be partially initialized
+        except Exception:
+            pass  # Object may be partially initialized or close() may fail
 
-    def _get_thread_local_handle(self):
+    def _get_thread_local_handle(self) -> Optional[tifffile.TiffFile]:
         """
         Get or create a thread-local TiffFile handle for the current thread.
 
@@ -301,8 +308,6 @@ class TileFusion:
             return self._thread_local.tiff_handle
 
         # Create a new handle for this thread
-        import tifffile
-
         handle = tifffile.TiffFile(self.tiff_path)
         self._thread_local.tiff_handle = handle
 
