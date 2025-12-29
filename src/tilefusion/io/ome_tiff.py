@@ -94,9 +94,10 @@ def load_ome_tiff_metadata(tiff_path: Path) -> Dict[str, Any]:
             "tile_positions": tile_positions,
             "tiff_handle": tif,
         }
-    except (ValueError, ET.ParseError):
-        # Catch only known metadata parsing errors; let other exceptions propagate
-        # to reveal programming bugs (AttributeError, KeyError, IndexError)
+    except Exception:
+        # Ensure handle is closed on any error to prevent resource leaks.
+        # This includes IndexError (empty series/images in malformed files),
+        # AttributeError, KeyError, etc. The exception is still re-raised.
         tif.close()
         raise
 

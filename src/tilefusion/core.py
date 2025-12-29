@@ -288,7 +288,8 @@ class TileFusion:
         try:
             self.close()
         except Exception:
-            # Don't mask the original exception if close() fails
+            # If there was no exception in the with-block, propagate the close() failure.
+            # If there was an original exception, suppress close() errors so we don't mask it.
             if exc_type is None:
                 raise
 
