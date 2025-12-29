@@ -218,12 +218,26 @@ class TileFusion:
         self.center = None
 
     def close(self) -> None:
-        """Close any open file handles to release resources."""
-        if self._metadata and "tiff_handle" in self._metadata:
-            handle = self._metadata.get("tiff_handle")
+        """
+        Close any open file handles to release resources.
+
+        This should be called when finished using a TileFusion instance,
+        or use it as a context manager (``with TileFusion(...) as tf:``)
+        for automatic cleanup. Important for OME-TIFF inputs where file
+        handles are kept open for performance.
+        """
+        if self._metadata is not None and "tiff_handle" in self._metadata:
+            handle = self._metadata.pop("tiff_handle", None)
             if handle is not None:
                 handle.close()
-                self._metadata["tiff_handle"] = None
+
+    def __enter__(self) -> "TileFusion":
+        """Enter the runtime context."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit the runtime context and close file handles."""
+        self.close()
 
     def __del__(self):
         """Destructor to ensure file handles are closed."""
