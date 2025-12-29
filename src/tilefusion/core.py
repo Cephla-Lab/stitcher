@@ -268,8 +268,8 @@ class TileFusion:
             for handle in self._all_handles:
                 try:
                     handle.close()
-                except Exception:
-                    pass  # Best-effort cleanup
+                except (OSError, AttributeError):
+                    pass  # Best-effort cleanup: handle may be invalid or already closed
             self._all_handles.clear()
 
         # Reset thread-local storage to prevent stale handle access.
@@ -296,8 +296,8 @@ class TileFusion:
         """
         try:
             self.close()
-        except Exception:
-            pass  # Object may be partially initialized or close() may fail
+        except (OSError, AttributeError, TypeError):
+            pass  # Object may be partially initialized, or close() may fail during shutdown
 
     def _get_thread_local_handle(self) -> Optional[tifffile.TiffFile]:
         """
@@ -320,12 +320,13 @@ class TileFusion:
         ):
             return None
 
-        # Check if this thread already has a handle
-        if (
-            hasattr(self._thread_local, "tiff_handle")
-            and self._thread_local.tiff_handle is not None
-        ):
-            return self._thread_local.tiff_handle
+        # Check if this thread already has a valid (open) handle
+        if hasattr(self._thread_local, "tiff_handle"):
+            handle = self._thread_local.tiff_handle
+            # Verify handle exists and is not closed (closed handles have no filehandle)
+            if handle is not None and hasattr(handle, "filehandle") and handle.filehandle:
+                return handle
+            # Handle was closed or invalid - will create a new one below
 
         # Create a new handle for this thread
         handle = tifffile.TiffFile(self.tiff_path)
