@@ -103,9 +103,7 @@ with TileFusion("tiles.ome.tiff") as tf:
 ```python
 tf = TileFusion("tiles.ome.tiff")
 try:
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        executor.map(tf._read_tile, range(tf.n_tiles))
-    # Wait for all threads to complete before closing
+    tf.run()  # Handles thread pool internally
 finally:
     tf.close()
 ```

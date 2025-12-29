@@ -272,9 +272,11 @@ class TileFusion:
                     pass  # Best-effort cleanup: handle may be invalid or already closed
             self._all_handles.clear()
 
-        # Reset thread-local storage to prevent stale handle access.
-        # Setting individual attributes to None only affects the current thread;
-        # resetting the entire object ensures all threads get fresh handles.
+        # Reset thread-local storage so future calls to _get_thread_local_handle()
+        # will create new handles. Note: This only affects threads that access
+        # self._thread_local AFTER this point. Threads that cached a handle reference
+        # before close() was called will still have stale (closed) handles, but
+        # _get_thread_local_handle() now checks for closed handles and creates new ones.
         self._thread_local = threading.local()
 
     def __enter__(self) -> "TileFusion":
@@ -283,7 +285,12 @@ class TileFusion:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Exit the runtime context and close file handles."""
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Don't mask the original exception if close() fails
+            if exc_type is None:
+                raise
 
     def __del__(self):
         """
@@ -320,7 +327,11 @@ class TileFusion:
         ):
             return None
 
-        # Check if this thread already has a valid (open) handle
+        # Check if this thread already has a valid (open) handle.
+        # NOTE: There is a race condition between this check and using the handle -
+        # another thread could call close() after validation but before the handle
+        # is used. This is documented behavior; callers must ensure close() is only
+        # called after all read operations complete.
         if hasattr(self._thread_local, "tiff_handle"):
             handle = self._thread_local.tiff_handle
             # Verify handle exists and is not closed (closed handles have no filehandle)

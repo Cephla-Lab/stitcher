@@ -165,14 +165,24 @@ class TestOMETiffMetadata:
 
     def test_handle_closed_on_error(self, tmp_path):
         """Test that handle is closed if metadata parsing fails (ID 2650114878)."""
+        import os
+
         # Create invalid TIFF (no OME metadata)
         path = tmp_path / "invalid.tiff"
         tifffile.imwrite(path, np.zeros((10, 10), dtype=np.uint16))
 
         with pytest.raises(ValueError, match="does not contain OME metadata"):
             load_ome_tiff_metadata(path)
-        # File should be closed (no resource leak) - if not, subsequent
-        # operations on the file would fail on Windows
+
+        # Verify file handle is closed by attempting operations that would fail
+        # if the handle were still open (especially on Windows)
+        # 1. We can reopen the file
+        with tifffile.TiffFile(path) as tif:
+            assert tif is not None
+
+        # 2. We can delete the file (would fail on Windows with open handle)
+        os.remove(path)
+        assert not path.exists()
 
 
 class TestThreadSafety:
@@ -263,6 +273,7 @@ class TestThreadSafety:
         from tilefusion import TileFusion
 
         path, _ = sample_ome_tiff
+        tf = None
 
         try:
             tf = TileFusion(path)
@@ -282,8 +293,14 @@ class TestThreadSafety:
             tf.close()
             assert len(tf._all_handles) == 0, "Handles not cleaned up"
 
-        except Exception:
-            pytest.skip("OME-TIFF creation requires proper OME-XML handling")
+        except Exception as e:
+            if "OME" in str(e) or "series" in str(e).lower():
+                pytest.skip("OME-TIFF creation requires proper OME-XML handling")
+            raise
+        finally:
+            # Ensure cleanup even if test fails
+            if tf is not None:
+                tf.close()
 
 
 class TestTileFusionResourceManagement:

@@ -94,7 +94,8 @@ def load_ome_tiff_metadata(tiff_path: Path) -> Dict[str, Any]:
             "tile_positions": tile_positions,
             "tiff_handle": tif,
         }
-    except Exception:
+    except (ValueError, ET.ParseError, AttributeError, KeyError, IndexError):
+        # Catch only metadata parsing errors; let other exceptions propagate
         tif.close()
         raise
 
@@ -127,6 +128,12 @@ def read_ome_tiff_tile(
     On Windows, seek+read operations are not atomic, leading to data
     corruption. Use separate handles per thread (TileFusion handles
     this automatically via thread-local storage).
+
+    Note
+    ----
+    When a ``tiff_handle`` is provided, the caller remains responsible for
+    closing it even if this function raises an exception. For best performance
+    with repeated reads, keep the handle open and reuse it across calls.
     """
     if tiff_handle is not None:
         arr = tiff_handle.series[tile_idx].asarray()
@@ -174,6 +181,12 @@ def read_ome_tiff_region(
     On Windows, seek+read operations are not atomic, leading to data
     corruption. Use separate handles per thread (TileFusion handles
     this automatically via thread-local storage).
+
+    Note
+    ----
+    When a ``tiff_handle`` is provided, the caller remains responsible for
+    closing it even if this function raises an exception. For best performance
+    with repeated reads, keep the handle open and reuse it across calls.
     """
     if tiff_handle is not None:
         arr = tiff_handle.series[tile_idx].asarray()
