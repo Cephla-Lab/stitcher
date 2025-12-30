@@ -619,7 +619,7 @@ class TileFusion:
 
         if needs_batching:
             # Batched approach for large datasets
-            avg_pair_bytes = estimated_memory // n_pairs if n_pairs > 0 else 1
+            avg_pair_bytes = max(1, estimated_memory // n_pairs) if n_pairs > 0 else 1
             batch_size = max(16, ram_budget // avg_pair_bytes)
             n_batches = (n_pairs + batch_size - 1) // batch_size
 
