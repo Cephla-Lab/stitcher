@@ -5,6 +5,8 @@ GPU/CPU detection, array operations, and helper functions.
 All functions support GPU acceleration via PyTorch with automatic CPU fallback.
 """
 
+from typing import Any, Callable, Union
+
 import numpy as np
 
 __all__ = [
@@ -67,7 +69,12 @@ _SSIM_K2 = 0.03  # SSIM constant K2 (contrast)
 # =============================================================================
 
 
-def phase_cross_correlation(reference_image, moving_image, upsample_factor=1, **kwargs):
+def phase_cross_correlation(
+    reference_image: np.ndarray,
+    moving_image: np.ndarray,
+    upsample_factor: int = 1,
+    **kwargs,
+) -> tuple[np.ndarray, float, float]:
     """
     Phase cross-correlation using GPU (torch FFT) or CPU (skimage).
 
@@ -182,7 +189,11 @@ def _subpixel_refine_torch(correlation, peak_y, peak_x, h, w):
 # =============================================================================
 
 
-def shift_array(arr, shift_vec, preserve_dtype=True):
+def shift_array(
+    arr: np.ndarray,
+    shift_vec: tuple[float, float],
+    preserve_dtype: bool = True,
+) -> np.ndarray:
     """
     Shift array by subpixel amounts using GPU (torch) or CPU (scipy).
 
@@ -190,7 +201,7 @@ def shift_array(arr, shift_vec, preserve_dtype=True):
     ----------
     arr : ndarray
         2D input array.
-    shift_vec : array-like
+    shift_vec : tuple[float, float]
         (dy, dx) shift amounts.
     preserve_dtype : bool
         If True, output dtype matches input dtype. Default True.
@@ -253,7 +264,11 @@ def _shift_array_torch(arr: np.ndarray, shift_vec) -> np.ndarray:
 # =============================================================================
 
 
-def match_histograms(image, reference, preserve_dtype=True):
+def match_histograms(
+    image: np.ndarray,
+    reference: np.ndarray,
+    preserve_dtype: bool = True,
+) -> np.ndarray:
     """
     Match histogram of image to reference using GPU (torch) or CPU (skimage).
 
@@ -314,7 +329,12 @@ def _match_histograms_torch(image: np.ndarray, reference: np.ndarray) -> np.ndar
 # =============================================================================
 
 
-def block_reduce(arr, block_size, func=np.mean, preserve_dtype=True):
+def block_reduce(
+    arr: np.ndarray,
+    block_size: tuple[int, ...],
+    func: Callable = np.mean,
+    preserve_dtype: bool = True,
+) -> np.ndarray:
     """
     Block reduce array using GPU (torch) or CPU (skimage).
 
@@ -322,9 +342,9 @@ def block_reduce(arr, block_size, func=np.mean, preserve_dtype=True):
     ----------
     arr : ndarray
         Input array (2D or 3D with channel dim first).
-    block_size : tuple
+    block_size : tuple[int, ...]
         Reduction factors per dimension.
-    func : callable
+    func : Callable
         Reduction function (only np.mean supported on GPU).
     preserve_dtype : bool
         If True, output dtype matches input dtype. Default True.
@@ -377,7 +397,7 @@ def _block_reduce_torch(arr: np.ndarray, block_size: tuple) -> np.ndarray:
 # =============================================================================
 
 
-def compute_ssim(arr1, arr2, win_size: int) -> float:
+def compute_ssim(arr1: np.ndarray, arr2: np.ndarray, win_size: int) -> float:
     """
     Compute SSIM using GPU (torch) or CPU (skimage).
 
@@ -472,15 +492,18 @@ def make_1d_profile(length: int, blend: int) -> np.ndarray:
     return prof
 
 
-def to_numpy(arr):
+def to_numpy(arr) -> np.ndarray:
     """Convert array to numpy, handling both CPU and GPU arrays."""
     if TORCH_AVAILABLE and torch is not None and isinstance(arr, torch.Tensor):
         return arr.cpu().numpy()
     return np.asarray(arr)
 
 
-def to_device(arr):
-    """Move array to GPU if available, else return numpy array."""
+def to_device(arr) -> Union[Any, np.ndarray]:
+    """Move array to GPU if available, else return numpy array.
+
+    Returns torch.Tensor on GPU if CUDA available, else np.ndarray.
+    """
     if CUDA_AVAILABLE:
         return torch.from_numpy(np.asarray(arr)).cuda()
     return np.asarray(arr)
