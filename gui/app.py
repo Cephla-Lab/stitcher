@@ -1298,7 +1298,11 @@ class StitcherGUI(QMainWindow):
                 from tilefusion import save_flatfield as save_ff
 
                 input_path = Path(self.drop_area.file_path)
-                auto_save_path = input_path.parent / f"{input_path.stem}_flatfield.npy"
+                # Use path.name for directories, path.stem for files (consistent with auto-load)
+                if input_path.is_dir():
+                    auto_save_path = input_path / f"{input_path.name}_flatfield.npy"
+                else:
+                    auto_save_path = input_path.parent / f"{input_path.stem}_flatfield.npy"
                 save_ff(auto_save_path, self.flatfield, self.darkfield)
                 self.log(f"Auto-saved flatfield to {auto_save_path}")
             except Exception as e:
@@ -1308,19 +1312,19 @@ class StitcherGUI(QMainWindow):
         if self.flatfield is None:
             return
 
-        # Default filename based on input
-        default_name = "flatfield.npy"
+        # Default path based on input (consistent with auto-save/auto-load)
+        default_path = "flatfield.npy"
         if self.drop_area.file_path:
-            default_name = f"{Path(self.drop_area.file_path).stem}_flatfield.npy"
+            input_path = Path(self.drop_area.file_path)
+            if input_path.is_dir():
+                default_path = str(input_path / f"{input_path.name}_flatfield.npy")
+            else:
+                default_path = str(input_path.parent / f"{input_path.stem}_flatfield.npy")
 
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Flatfield",
-            (
-                str(Path(self.drop_area.file_path).parent / default_name)
-                if self.drop_area.file_path
-                else default_name
-            ),
+            default_path,
             "NumPy files (*.npy);;All files (*.*)",
         )
         if file_path:
