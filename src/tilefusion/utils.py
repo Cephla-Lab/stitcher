@@ -248,15 +248,12 @@ def _match_histograms_torch(image: np.ndarray, reference: np.ndarray) -> np.ndar
     img_sorted, img_indices = torch.sort(img)
     ref_sorted, _ = torch.sort(ref)
 
-    # Create inverse mapping
+    # Create inverse mapping (rank of each pixel)
     inv_indices = torch.empty_like(img_indices)
     inv_indices[img_indices] = torch.arange(len(img), device="cuda")
 
-    # Interpolate reference values at image quantiles
-    img_quantiles = torch.linspace(0, 1, len(img), device="cuda")
-    ref_quantiles = torch.linspace(0, 1, len(ref), device="cuda")
-
     # Map image values to reference values via quantile matching
+    # For each pixel, find corresponding quantile in reference
     interp_values = torch.zeros_like(img)
     interp_values[img_indices] = ref_sorted[
         (inv_indices.float() / len(img) * len(ref)).long().clamp(0, len(ref) - 1)
