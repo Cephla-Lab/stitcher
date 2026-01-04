@@ -363,15 +363,14 @@ def compute_ssim(arr1, arr2, win_size: int) -> float:
     arr1_np = np.asarray(arr1, dtype=np.float32)
     arr2_np = np.asarray(arr2, dtype=np.float32)
 
-    if CUDA_AVAILABLE and arr1_np.ndim == 2:
-        data_range = float(arr1_np.max() - arr1_np.min())
-        if data_range == 0:
-            data_range = 1.0
-        return _compute_ssim_torch(arr1_np, arr2_np, win_size, data_range)
-
+    # Compute data range once
     data_range = float(arr1_np.max() - arr1_np.min())
     if data_range == 0:
         data_range = 1.0
+
+    if CUDA_AVAILABLE and arr1_np.ndim == 2:
+        return _compute_ssim_torch(arr1_np, arr2_np, win_size, data_range)
+
     return float(_ssim_cpu(arr1_np, arr2_np, win_size=win_size, data_range=data_range))
 
 
