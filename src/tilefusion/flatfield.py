@@ -120,7 +120,10 @@ def apply_flatfield(
     Returns
     -------
     corrected : ndarray
-        Corrected tile with shape (C, Y, X), same dtype as input.
+        Corrected tile with shape (C, Y, X), cast back to the input dtype.
+        Note: Values are computed in float then cast to the original dtype,
+        which may result in clipping for values outside the dtype's valid
+        range (e.g., negative values clipped to 0 for unsigned types).
 
     Raises
     ------
@@ -248,10 +251,16 @@ def load_flatfield(path: Path) -> Tuple[np.ndarray, Optional[np.ndarray]]:
 
     Raises
     ------
+    OSError
+        If the file cannot be read (not found, permission denied, etc.).
     ValueError
         If the file format is invalid (not a dictionary with 'flatfield' key).
     """
-    loaded = np.load(path, allow_pickle=True)
+    try:
+        loaded = np.load(path, allow_pickle=True)
+    except OSError as exc:
+        raise OSError(f"Cannot read flatfield file '{path}': {exc}") from exc
+
     try:
         data = loaded.item()
     except (AttributeError, ValueError) as exc:

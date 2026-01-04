@@ -1221,6 +1221,8 @@ class StitcherGUI(QMainWindow):
         self.view_flatfield_button.setEnabled(False)
         self.clear_flatfield_button.setEnabled(False)
         self.save_flatfield_button.setEnabled(False)
+        # Uncheck flatfield correction when no flatfield is loaded
+        self.flatfield_checkbox.setChecked(False)
 
         # Auto-load existing flatfield if present
         flatfield_path = path.parent / f"{path.stem}_flatfield.npy"
@@ -1340,6 +1342,8 @@ class StitcherGUI(QMainWindow):
             )
             self.view_flatfield_button.setEnabled(True)
             self.clear_flatfield_button.setEnabled(True)
+            # Enable flatfield correction when successfully loaded
+            self.flatfield_checkbox.setChecked(True)
             self.log(f"Loaded flatfield from {file_path}: {self.flatfield.shape}")
         except Exception as e:
             self.flatfield_status.setText(f"Load failed: {e}")
