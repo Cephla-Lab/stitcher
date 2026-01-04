@@ -32,6 +32,11 @@ USING_GPU = CUDA_AVAILABLE
 xp = np
 cp = None
 
+# Constants
+_FFT_EPS = 1e-10  # Epsilon for FFT normalization to avoid division by zero
+_SSIM_K1 = 0.01  # SSIM constant K1 (luminance)
+_SSIM_K2 = 0.03  # SSIM constant K2 (contrast)
+
 
 # =============================================================================
 # Phase Cross-Correlation (GPU FFT)
@@ -79,8 +84,7 @@ def _phase_cross_correlation_torch(
     ref_fft = torch.fft.fft2(ref)
     mov_fft = torch.fft.fft2(mov)
     cross_power = ref_fft * torch.conj(mov_fft)
-    eps = 1e-10
-    cross_power = cross_power / (torch.abs(cross_power) + eps)
+    cross_power = cross_power / (torch.abs(cross_power) + _FFT_EPS)
 
     # Inverse FFT to get correlation
     correlation = torch.fft.ifft2(cross_power).real
@@ -378,8 +382,8 @@ def _compute_ssim_torch(
     arr1: np.ndarray, arr2: np.ndarray, win_size: int, data_range: float
 ) -> float:
     """GPU SSIM using torch conv2d for local statistics."""
-    C1 = (0.01 * data_range) ** 2
-    C2 = (0.03 * data_range) ** 2
+    C1 = (_SSIM_K1 * data_range) ** 2
+    C2 = (_SSIM_K2 * data_range) ** 2
 
     # Create uniform window
     window = torch.ones(1, 1, win_size, win_size, device="cuda") / (win_size * win_size)
