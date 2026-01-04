@@ -903,7 +903,9 @@ class FlatfieldWorker(QThread):
                 tiles.append(tile)
 
             self.progress.emit("Calculating flatfield with BaSiCPy...")
-            flatfield, darkfield = calculate_flatfield(tiles, use_darkfield=self.use_darkfield)
+            flatfield, darkfield = calculate_flatfield(
+                tiles, use_darkfield=self.use_darkfield, constant_darkfield=True
+            )
 
             self.progress.emit("Flatfield calculation complete!")
             self.finished.emit(flatfield, darkfield)

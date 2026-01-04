@@ -230,6 +230,19 @@ class TileFusion:
         self._flatfield = flatfield  # Shape (C, Y, X) or None
         self._darkfield = darkfield  # Shape (C, Y, X) or None
 
+        # Validate flatfield/darkfield shapes match tile dimensions
+        expected_shape = (self.channels, self.Y, self.X)
+        if flatfield is not None and flatfield.shape != expected_shape:
+            raise ValueError(
+                f"flatfield.shape {flatfield.shape} does not match expected "
+                f"tile shape {expected_shape} (channels, Y, X)"
+            )
+        if darkfield is not None and darkfield.shape != expected_shape:
+            raise ValueError(
+                f"darkfield.shape {darkfield.shape} does not match expected "
+                f"tile shape {expected_shape} (channels, Y, X)"
+            )
+
         # Thread-local storage for TiffFile handles (thread-safe concurrent access)
         self._thread_local = threading.local()
         self._handles_lock = threading.Lock()
