@@ -877,7 +877,9 @@ class FlatfieldWorker(QThread):
 
             self.progress.emit("Loading metadata...")
 
-            # Create TileFusion instance to read tiles
+            # Create TileFusion instance to read tiles.
+            # NOTE: No flatfield/darkfield passed intentionally - flatfield estimation
+            # must be performed on raw, uncorrected tiles.
             tf = TileFusion(self.file_path)
 
             # Determine how many tiles to sample
@@ -892,6 +894,8 @@ class FlatfieldWorker(QThread):
             sample_indices = sorted(sample_indices)
 
             # Read sampled tiles
+            # NOTE: Using private method tf._read_tile intentionally.
+            # FlatfieldWorker needs direct access to raw tile data for sampling.
             tiles = []
             for i, tile_idx in enumerate(sample_indices):
                 self.progress.emit(f"Reading tile {i+1}/{n_samples}...")
@@ -1413,7 +1417,7 @@ class StitcherGUI(QMainWindow):
                 if sys.platform == "darwin":
                     subprocess.Popen(["open", f.name])
                 elif sys.platform == "win32":
-                    subprocess.Popen(["start", f.name], shell=True)
+                    os.startfile(f.name)
                 else:
                     subprocess.Popen(["xdg-open", f.name])
 

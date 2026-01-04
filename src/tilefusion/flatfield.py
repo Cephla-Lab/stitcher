@@ -125,9 +125,8 @@ def apply_flatfield(
     -------
     corrected : ndarray
         Corrected tile with shape (C, Y, X), cast back to the input dtype.
-        Note: Values are computed in float then cast to the original dtype,
-        which may result in clipping for values outside the dtype's valid
-        range (e.g., negative values clipped to 0 for unsigned types).
+        For integer dtypes, values are clipped to the valid range before
+        casting (e.g., negative values clipped to 0 for unsigned types).
 
     Raises
     ------
@@ -152,6 +151,11 @@ def apply_flatfield(
         corrected = (tile_f - darkfield.astype(np.float32)) / flatfield_safe
     else:
         corrected = tile_f / flatfield_safe
+
+    # Clip to valid range for integer dtypes to avoid wraparound
+    if np.issubdtype(tile.dtype, np.integer):
+        info = np.iinfo(tile.dtype)
+        corrected = np.clip(corrected, info.min, info.max)
 
     return corrected.astype(tile.dtype)
 
@@ -209,6 +213,11 @@ def apply_flatfield_region(
         corrected = (region_f - df_region.astype(np.float32)) / ff_safe
     else:
         corrected = region_f / ff_safe
+
+    # Clip to valid range for integer dtypes to avoid wraparound
+    if np.issubdtype(region.dtype, np.integer):
+        info = np.iinfo(region.dtype)
+        corrected = np.clip(corrected, info.min, info.max)
 
     return corrected.astype(region.dtype)
 
