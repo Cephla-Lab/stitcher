@@ -7,6 +7,26 @@ All functions support GPU acceleration via PyTorch with automatic CPU fallback.
 
 import numpy as np
 
+__all__ = [
+    # GPU detection flags
+    "TORCH_AVAILABLE",
+    "CUDA_AVAILABLE",
+    "USING_GPU",
+    # Array module (legacy compatibility)
+    "xp",
+    "cp",
+    # Core functions
+    "phase_cross_correlation",
+    "shift_array",
+    "match_histograms",
+    "block_reduce",
+    "compute_ssim",
+    # Utility functions
+    "make_1d_profile",
+    "to_numpy",
+    "to_device",
+]
+
 # GPU detection - PyTorch based
 try:
     import torch
@@ -27,10 +47,13 @@ from skimage.measure import block_reduce as _block_reduce_cpu
 from skimage.metrics import structural_similarity as _ssim_cpu
 from skimage.registration import phase_cross_correlation as _phase_cross_correlation_cpu
 
-# Legacy compatibility
+# Legacy compatibility - used by core.py and registration.py
+# xp: array module (numpy, since cupy was removed)
+# cp: cupy module (always None now, kept for API compatibility)
+# USING_GPU: exported in __init__.py for user code
 USING_GPU = CUDA_AVAILABLE
 xp = np
-cp = None
+cp = None  # cupy removed; GPU ops now use PyTorch internally
 
 # Constants
 _FFT_EPS = 1e-10  # Epsilon for FFT normalization to avoid division by zero
