@@ -324,7 +324,14 @@ def _block_reduce_torch(arr: np.ndarray, block_size: tuple) -> np.ndarray:
         return out.squeeze().cpu().numpy()
 
     elif ndim == 3:
-        kernel = (block_size[1], block_size[2]) if len(block_size) == 3 else block_size
+        # For 3D arrays (C, H, W), extract spatial kernel from block_size
+        if len(block_size) == 3:
+            # block_size is (c_factor, h_factor, w_factor)
+            # Only use spatial dimensions for avg_pool2d
+            kernel = (block_size[1], block_size[2])
+        else:
+            # block_size is (h_factor, w_factor) - apply to spatial dims
+            kernel = (block_size[0], block_size[1])
         t = torch.from_numpy(arr).float().cuda().unsqueeze(0)
         out = torch.nn.functional.avg_pool2d(t, kernel, stride=kernel)
         return out.squeeze(0).cpu().numpy()
