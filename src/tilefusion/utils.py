@@ -34,6 +34,7 @@ cp = None
 
 # Constants
 _FFT_EPS = 1e-10  # Epsilon for FFT normalization to avoid division by zero
+_PARABOLIC_EPS = 1e-10  # Epsilon for parabolic fit denominator check
 _SSIM_K1 = 0.01  # SSIM constant K1 (luminance)
 _SSIM_K2 = 0.03  # SSIM constant K2 (contrast)
 
@@ -130,7 +131,7 @@ def _subpixel_refine_torch(correlation, peak_y, peak_x, h, w):
         denom = 2 * (2 * center_val - neighborhood[0, 1].item() - neighborhood[2, 1].item())
         dy = (
             (neighborhood[0, 1].item() - neighborhood[2, 1].item()) / denom
-            if abs(denom) > 1e-10
+            if abs(denom) > _PARABOLIC_EPS
             else 0.0
         )
     else:
@@ -141,7 +142,7 @@ def _subpixel_refine_torch(correlation, peak_y, peak_x, h, w):
         denom = 2 * (2 * center_val - neighborhood[1, 0].item() - neighborhood[1, 2].item())
         dx = (
             (neighborhood[1, 0].item() - neighborhood[1, 2].item()) / denom
-            if abs(denom) > 1e-10
+            if abs(denom) > _PARABOLIC_EPS
             else 0.0
         )
     else:
