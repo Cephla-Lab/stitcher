@@ -80,6 +80,9 @@ Documentation = "https://github.com/cephla/tilefusion#readme"
 Repository = "https://github.com/cephla/tilefusion"
 Issues = "https://github.com/cephla/tilefusion/issues"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/tilefusion", "gui", "scripts"]
 
