@@ -328,6 +328,9 @@ class FusionWorker(QThread):
         fusion_mode="blended",
         flatfield=None,
         darkfield=None,
+        zarr_version=2,
+        separate_timepoints=False,
+        blend_bias=0.5,
     ):
         super().__init__()
         self.tiff_path = tiff_path
@@ -337,6 +340,9 @@ class FusionWorker(QThread):
         self.fusion_mode = fusion_mode
         self.flatfield = flatfield
         self.darkfield = darkfield
+        self.zarr_version = zarr_version
+        self.separate_timepoints = separate_timepoints
+        self.blend_bias = blend_bias
         self.output_path = None
 
     def run(self):
@@ -379,6 +385,9 @@ class FusionWorker(QThread):
                 downsample_factors=(self.downsample_factor, self.downsample_factor),
                 flatfield=self.flatfield,
                 darkfield=self.darkfield,
+                zarr_version=self.zarr_version,
+                separate_timepoints=self.separate_timepoints,
+                blend_bias=self.blend_bias,
             )
             load_time = time.time() - step_start
             self.progress.emit(f"Loaded {tf.n_tiles} tiles ({tf.Y}x{tf.X} each) [{load_time:.1f}s]")
@@ -702,7 +711,7 @@ class StitcherGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Stitcher")
-        self.setMinimumSize(500, 850)
+        self.setMinimumSize(500, 950)
 
         self.worker = None
         self.output_path = None
@@ -868,6 +877,31 @@ class StitcherGUI(QMainWindow):
         settings_layout = QVBoxLayout(settings_group)
         settings_layout.setSpacing(8)
 
+        # Zarr version selection
+        zarr_version_layout = QHBoxLayout()
+        zarr_version_layout.addWidget(QLabel("Output format:"))
+        self.zarr_version_combo = QComboBox()
+        self.zarr_version_combo.addItem("Zarr v2 (napari-compatible)", 2)
+        self.zarr_version_combo.addItem("Zarr v3 (faster, custom viewer)", 3)
+        self.zarr_version_combo.setCurrentIndex(0)  # Default to v2
+        self.zarr_version_combo.setToolTip(
+            "Zarr v2: Opens in standard napari and most viewers\n"
+            "Zarr v3: Better performance with sharding, requires custom viewer button"
+        )
+        zarr_version_layout.addWidget(self.zarr_version_combo)
+        zarr_version_layout.addStretch()
+        settings_layout.addLayout(zarr_version_layout)
+
+        # Separate timepoints option
+        self.separate_timepoints_checkbox = QCheckBox("Save timepoints as separate files")
+        self.separate_timepoints_checkbox.setChecked(False)
+        self.separate_timepoints_checkbox.setToolTip(
+            "When enabled: Creates t0.ome.zarr, t1.ome.zarr, etc.\n"
+            "When disabled: All timepoints in single file (default)\n"
+            "Note: Only applies when dataset has multiple timepoints"
+        )
+        settings_layout.addWidget(self.separate_timepoints_checkbox)
+
         self.registration_checkbox = QCheckBox("Enable registration refinement")
         self.registration_checkbox.setChecked(False)
         self.registration_checkbox.toggled.connect(self.on_registration_toggled)
@@ -895,14 +929,41 @@ class StitcherGUI(QMainWindow):
         # Blend pixels (shown when blending enabled)
         self.blend_value_widget = QWidget()
         self.blend_value_widget.setVisible(False)
-        blend_value_layout = QHBoxLayout(self.blend_value_widget)
+        blend_value_layout = QVBoxLayout(self.blend_value_widget)
         blend_value_layout.setContentsMargins(20, 0, 0, 0)
-        blend_value_layout.addWidget(QLabel("Blend pixels:"))
+        blend_value_layout.setSpacing(8)
+
+        # Blend width row
+        blend_width_row = QHBoxLayout()
+        blend_width_row.addWidget(QLabel("Blend pixels:"))
         self.blend_spin = QSpinBox()
         self.blend_spin.setRange(1, 500)
         self.blend_spin.setValue(50)
-        blend_value_layout.addWidget(self.blend_spin)
-        blend_value_layout.addStretch()
+        blend_width_row.addWidget(self.blend_spin)
+        blend_width_row.addStretch()
+        blend_value_layout.addLayout(blend_width_row)
+
+        # Blend bias row
+        blend_bias_row = QHBoxLayout()
+        blend_bias_row.addWidget(QLabel("Blend bias:"))
+        self.blend_bias_slider = QSlider(Qt.Horizontal)
+        self.blend_bias_slider.setRange(0, 100)
+        self.blend_bias_slider.setValue(50)
+        self.blend_bias_slider.setFixedWidth(120)
+        self.blend_bias_slider.setToolTip(
+            "Controls left/right tile contribution in overlaps:\n"
+            "• 50%: Equal blend (default)\n"
+            "• >50%: Favor left/top tiles\n"
+            "• <50%: Favor right/bottom tiles"
+        )
+        self.blend_bias_slider.valueChanged.connect(self._on_blend_bias_changed)
+        blend_bias_row.addWidget(self.blend_bias_slider)
+        self.blend_bias_label = QLabel("50%")
+        self.blend_bias_label.setFixedWidth(35)
+        blend_bias_row.addWidget(self.blend_bias_label)
+        blend_bias_row.addStretch()
+        blend_value_layout.addLayout(blend_bias_row)
+
         settings_layout.addWidget(self.blend_value_widget)
 
         layout.addWidget(settings_group)
@@ -1000,6 +1061,9 @@ class StitcherGUI(QMainWindow):
 
     def on_blend_toggled(self, checked):
         self.blend_value_widget.setVisible(checked)
+
+    def _on_blend_bias_changed(self, value):
+        self.blend_bias_label.setText(f"{value}%")
 
     def on_flatfield_toggled(self, checked):
         # Only show/hide flatfield options; preserve any loaded/calculated data
@@ -1219,14 +1283,20 @@ class StitcherGUI(QMainWindow):
         if self.blend_checkbox.isChecked():
             blend_val = self.blend_spin.value()
             blend_pixels = (blend_val, blend_val)
+            blend_bias = self.blend_bias_slider.value() / 100.0
             fusion_mode = "blended"
         else:
             blend_pixels = (0, 0)
+            blend_bias = 0.5
             fusion_mode = "direct"
 
         # Get flatfield if enabled
         flatfield = self.flatfield if self.flatfield_checkbox.isChecked() else None
         darkfield = self.darkfield if self.flatfield_checkbox.isChecked() else None
+
+        # Get selected zarr version
+        zarr_version = self.zarr_version_combo.currentData()
+        separate_timepoints = self.separate_timepoints_checkbox.isChecked()
 
         self.worker = FusionWorker(
             self.drop_area.file_path,
@@ -1236,6 +1306,9 @@ class StitcherGUI(QMainWindow):
             fusion_mode,
             flatfield=flatfield,
             darkfield=darkfield,
+            zarr_version=zarr_version,
+            separate_timepoints=separate_timepoints,
+            blend_bias=blend_bias,
         )
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.on_fusion_finished)
@@ -1374,12 +1447,22 @@ class StitcherGUI(QMainWindow):
             for scale_dir in scale_dirs:
                 image_path = scale_dir / "image"
                 if image_path.exists():
-                    store = ts.open(
-                        {
-                            "driver": "zarr3",
-                            "kvstore": {"driver": "file", "path": str(image_path)},
-                        }
-                    ).result()
+                    # Try Zarr v3 first, fall back to v2
+                    try:
+                        store = ts.open(
+                            {
+                                "driver": "zarr3",
+                                "kvstore": {"driver": "file", "path": str(image_path)},
+                            }
+                        ).result()
+                    except Exception:
+                        # Fall back to Zarr v2
+                        store = ts.open(
+                            {
+                                "driver": "zarr",
+                                "kvstore": {"driver": "file", "path": str(image_path)},
+                            }
+                        ).result()
                     pyramid_data.append(store)
 
             if not pyramid_data:
