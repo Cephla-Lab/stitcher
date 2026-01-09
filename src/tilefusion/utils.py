@@ -50,9 +50,9 @@ def compute_ssim(arr1, arr2, win_size: int) -> float:
     return float(_ssim_cpu(arr1_np, arr2_np, win_size=win_size, data_range=data_range))
 
 
-def make_1d_profile(length: int, blend: int) -> np.ndarray:
+def make_1d_profile(length: int, blend: int, bias: float = 0.5) -> np.ndarray:
     """
-    Create a linear ramp profile over `blend` pixels at each end.
+    Create a ramp profile over `blend` pixels at each end.
 
     Parameters
     ----------
@@ -60,18 +60,34 @@ def make_1d_profile(length: int, blend: int) -> np.ndarray:
         Number of pixels.
     blend : int
         Ramp width.
+    bias : float
+        Blend bias from 0.0 to 1.0 (default 0.5).
+        - 0.5: symmetric linear blend (50/50 at overlap center)
+        - > 0.5: favor left/top tiles (e.g., 0.7 gives ~70% from left tile)
+        - < 0.5: favor right/bottom tiles (e.g., 0.3 gives ~70% from right tile)
 
     Returns
     -------
     prof : (length,) float32
-        Linear profile.
+        Blend profile.
     """
     blend = min(blend, length // 2)
     prof = np.ones(length, dtype=np.float32)
     if blend > 0:
-        ramp = np.linspace(0, 1, blend, endpoint=False, dtype=np.float32)
-        prof[:blend] = ramp
-        prof[-blend:] = ramp[::-1]
+        # Linear position from 0 to 1 across the blend region
+        t = np.linspace(0, 1, blend, endpoint=False, dtype=np.float32)
+
+        # Use power-law ramps for asymmetric blending
+        # bias=0.5 gives linear ramps (power=1), symmetric profile
+        # bias>0.5 makes left ramp rise faster, right ramp fall slower (favor left tiles)
+        # bias<0.5 makes left ramp rise slower, right ramp fall faster (favor right tiles)
+        p_rise = max(0.1, bias * 2)  # Power for rising ramp (left edge)
+        p_fall = max(0.1, (1 - bias) * 2)  # Power for falling ramp (right edge)
+
+        # Left edge: rising ramp with power p_rise (0 -> ~1)
+        prof[:blend] = t**p_rise
+        # Right edge: falling ramp with power p_fall (~1 -> 0), using reversed t
+        prof[-blend:] = t[::-1] ** p_fall
     return prof
 
 

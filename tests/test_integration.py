@@ -52,12 +52,37 @@ def _write_individual_tiffs_folder(
         json.dump(params, f)
 
 
+def _get_scale_path(path: Path, level: int = 0):
+    """Get path to a scale level (supports both v2 and v3 formats)."""
+    # zarr v3 structure: scale0/image, scale1/image, ...
+    v3_path = path / f"scale{level}" / "image"
+    # ome-zarr v2 structure: 0/, 1/, ...
+    v2_path = path / str(level)
+
+    if v3_path.exists():
+        return v3_path
+    if v2_path.exists():
+        return v2_path
+    return None
+
+
 def _read_fused_output(path: Path):
-    """Read the fused output from a zarr store."""
-    scale0 = path / "scale0" / "image"
-    store = ts.open(
-        {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(scale0)}}
-    ).result()
+    """Read the fused output from a zarr store (supports both v2 and v3 formats)."""
+    scale0 = _get_scale_path(path, 0)
+    if scale0 is None:
+        raise FileNotFoundError(f"No zarr data found at {path}")
+
+    # Detect format based on path structure
+    if "scale" in str(scale0):
+        # zarr v3
+        store = ts.open(
+            {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(scale0)}}
+        ).result()
+    else:
+        # ome-zarr v2
+        store = ts.open(
+            {"driver": "zarr", "kvstore": {"driver": "file", "path": str(scale0)}}
+        ).result()
     return store.read().result()
 
 
@@ -100,8 +125,8 @@ class TestTileFusionIntegration:
 
         # Verify output exists
         assert output_path.exists()
-        assert (output_path / "scale0" / "image").exists()
-        assert (output_path / "scale1" / "image").exists()
+        assert _get_scale_path(output_path, 0) is not None
+        assert _get_scale_path(output_path, 1) is not None
 
         # Read fused result
         fused = _read_fused_output(output_path)
@@ -340,10 +365,10 @@ class TestMultiscale:
         tf.run()
 
         # Check all scale levels exist
-        assert (output_path / "scale0" / "image").exists()
-        assert (output_path / "scale1" / "image").exists()
-        assert (output_path / "scale2" / "image").exists()
-        assert (output_path / "scale3" / "image").exists()
+        assert _get_scale_path(output_path, 0) is not None
+        assert _get_scale_path(output_path, 1) is not None
+        assert _get_scale_path(output_path, 2) is not None
+        assert _get_scale_path(output_path, 3) is not None
 
     def test_ngff_metadata(self, tmp_path):
         """Test that NGFF metadata is written correctly."""
@@ -363,13 +388,20 @@ class TestMultiscale:
         )
         tf.run()
 
-        # Check zarr.json has multiscales metadata
+        # Check metadata exists (zarr.json for v3, .zattrs for v2)
         zarr_json = output_path / "zarr.json"
-        assert zarr_json.exists()
+        zattrs = output_path / ".zattrs"
 
-        with open(zarr_json) as f:
-            meta = json.load(f)
-
-        assert "attributes" in meta
-        assert "ome" in meta["attributes"]
-        assert "multiscales" in meta["attributes"]["ome"]
+        if zarr_json.exists():
+            # zarr v3 format
+            with open(zarr_json) as f:
+                meta = json.load(f)
+            assert "attributes" in meta
+            assert "ome" in meta["attributes"]
+            assert "multiscales" in meta["attributes"]["ome"]
+        else:
+            # ome-zarr v2 format
+            assert zattrs.exists()
+            with open(zattrs) as f:
+                meta = json.load(f)
+            assert "multiscales" in meta

@@ -84,6 +84,10 @@ class TileFusion:
         Channel index for registration.
     multiscale_downsample : str
         Either "stride" (default) or "block_mean" to control multiscale reduction.
+    zarr_version : int
+        Zarr format version: 2 (default, napari-compatible) or 3 (with sharding for better performance).
+    separate_timepoints : bool
+        If True, save each timepoint as a separate .ome.zarr file (default False).
     """
 
     def __init__(
@@ -110,6 +114,9 @@ class TileFusion:
         region: Optional[str] = None,
         flatfield: Optional[np.ndarray] = None,
         darkfield: Optional[np.ndarray] = None,
+        zarr_version: int = 2,
+        separate_timepoints: bool = False,
+        blend_bias: float = 0.5,
     ):
         self.tiff_path = Path(tiff_path)
         if not self.tiff_path.exists():
@@ -206,11 +213,18 @@ class TileFusion:
         self._debug = bool(debug)
         self.metrics_filename = metrics_filename
         self._blend_pixels = tuple(blend_pixels)
+        self._blend_bias = float(blend_bias)
         self.channel_to_use = channel_to_use
 
         if multiscale_downsample not in ("stride", "block_mean"):
             raise ValueError('multiscale_downsample must be "stride" or "block_mean".')
         self.multiscale_downsample = multiscale_downsample
+
+        if zarr_version not in (2, 3):
+            raise ValueError("zarr_version must be 2 or 3")
+        self.zarr_version = zarr_version
+
+        self.separate_timepoints = separate_timepoints
 
         self._update_profiles()
         self.chunk_shape = (1, 1024, 1024)
@@ -414,6 +428,24 @@ class TileFusion:
         self._update_profiles()
 
     @property
+    def blend_bias(self) -> float:
+        """Blend bias from 0.0 to 1.0.
+
+        Controls the left/right contribution ratio in overlap regions:
+        - 0.5: symmetric blend (50/50 at overlap center)
+        - > 0.5: favor left/top tiles (e.g., 0.7 gives ~70% from left tile)
+        - < 0.5: favor right/bottom tiles (e.g., 0.3 gives ~70% from right tile)
+        """
+        return self._blend_bias
+
+    @blend_bias.setter
+    def blend_bias(self, bias: float):
+        if not 0.0 <= bias <= 1.0:
+            raise ValueError("blend_bias must be between 0.0 and 1.0.")
+        self._blend_bias = float(bias)
+        self._update_profiles()
+
+    @property
     def max_workers(self) -> int:
         """Maximum concurrent I/O workers."""
         return self._max_workers
@@ -438,10 +470,11 @@ class TileFusion:
     # -------------------------------------------------------------------------
 
     def _update_profiles(self) -> None:
-        """Recompute 1D feather profiles from blend_pixels."""
+        """Recompute 1D feather profiles from blend_pixels and blend_bias."""
         by, bx = self._blend_pixels
-        self.y_profile = make_1d_profile(self.Y, by)
-        self.x_profile = make_1d_profile(self.X, bx)
+        bias = self._blend_bias
+        self.y_profile = make_1d_profile(self.Y, by, bias)
+        self.x_profile = make_1d_profile(self.X, bx, bias)
 
     # -------------------------------------------------------------------------
     # I/O methods (delegate to format-specific loaders)
@@ -881,7 +914,12 @@ class TileFusion:
         self.shard_chunk = shard_chunk
 
         self.fused_ts = create_zarr_store(
-            out, tuple(full_shape), tuple(codec_chunk), tuple(shard_chunk), self.max_workers
+            out,
+            tuple(full_shape),
+            tuple(codec_chunk),
+            tuple(shard_chunk),
+            self.max_workers,
+            self.zarr_version,
         )
 
     # -------------------------------------------------------------------------
@@ -908,8 +946,23 @@ class TileFusion:
                 else:
                     self._fuse_tiles_full_plane(z_level=z, time_idx=t)
 
-    def _fuse_tiles_direct_plane(self, z_level: int = 0, time_idx: int = 0) -> None:
-        """Fuse tiles using direct placement for a single z/t plane."""
+    def _fuse_tiles_direct_plane(
+        self, z_level: int = 0, time_idx: int = 0, output_time_idx: int = None
+    ) -> None:
+        """Fuse tiles using direct placement for a single z/t plane.
+
+        Parameters
+        ----------
+        z_level : int
+            Z-level to process.
+        time_idx : int
+            Input timepoint index to read from.
+        output_time_idx : int, optional
+            Output timepoint index to write to. If None, uses time_idx.
+        """
+        if output_time_idx is None:
+            output_time_idx = time_idx
+
         import psutil
 
         offsets = [
@@ -951,9 +1004,9 @@ class TileFusion:
 
             if show_progress:
                 print("Writing to disk...")
-            self.fused_ts[time_idx : time_idx + 1, :, z_level : z_level + 1, :, :].write(
-                output
-            ).result()
+            self.fused_ts[
+                output_time_idx : output_time_idx + 1, :, z_level : z_level + 1, :, :
+            ].write(output).result()
             del output
         else:
             if show_progress:
@@ -976,13 +1029,31 @@ class TileFusion:
                     tile_region = tile_all[:, :tile_h, :tile_w].astype(np.uint16)
                     # Shape: (1, C, 1, h, w)
                     self.fused_ts[
-                        time_idx : time_idx + 1, :, z_level : z_level + 1, oy:y_end, ox:x_end
+                        output_time_idx : output_time_idx + 1,
+                        :,
+                        z_level : z_level + 1,
+                        oy:y_end,
+                        ox:x_end,
                     ].write(tile_region[np.newaxis, :, np.newaxis, :, :]).result()
 
         gc.collect()
 
-    def _fuse_tiles_full_plane(self, z_level: int = 0, time_idx: int = 0) -> None:
-        """Fuse all tiles using full-image accumulator for a single z/t plane."""
+    def _fuse_tiles_full_plane(
+        self, z_level: int = 0, time_idx: int = 0, output_time_idx: int = None
+    ) -> None:
+        """Fuse all tiles using full-image accumulator for a single z/t plane.
+
+        Parameters
+        ----------
+        z_level : int
+            Z-level to process.
+        time_idx : int
+            Input timepoint index to read from.
+        output_time_idx : int, optional
+            Output timepoint index to write to. If None, uses time_idx.
+        """
+        if output_time_idx is None:
+            output_time_idx = time_idx
         offsets = [
             (
                 int((y - self.offset[0]) / self._pixel_size[0]),
@@ -1015,7 +1086,7 @@ class TileFusion:
 
         normalize_shard(fused_block, weight_sum)
         # Write to 5D output: (T, C, Z, Y, X)
-        self.fused_ts[time_idx, :, z_level, :pad_Y, :pad_X].write(
+        self.fused_ts[output_time_idx, :, z_level, :pad_Y, :pad_X].write(
             fused_block.astype(np.uint16)
         ).result()
 
@@ -1026,9 +1097,28 @@ class TileFusion:
             cp.get_default_pinned_memory_pool().free_all_blocks()
 
     def _fuse_tiles_chunked_plane(
-        self, z_level: int = 0, time_idx: int = 0, ram_fraction: float = 0.4
+        self,
+        z_level: int = 0,
+        time_idx: int = 0,
+        ram_fraction: float = 0.4,
+        output_time_idx: int = None,
     ) -> None:
-        """Fuse tiles using memory-efficient chunked processing for a single z/t plane."""
+        """Fuse tiles using memory-efficient chunked processing for a single z/t plane.
+
+        Parameters
+        ----------
+        z_level : int
+            Z-level to process.
+        time_idx : int
+            Input timepoint index to read from.
+        ram_fraction : float
+            Fraction of available RAM to use.
+        output_time_idx : int, optional
+            Output timepoint index to write to. If None, uses time_idx.
+        """
+        if output_time_idx is None:
+            output_time_idx = time_idx
+
         import psutil
 
         available_ram = psutil.virtual_memory().available
@@ -1045,7 +1135,9 @@ class TileFusion:
         if block_size >= max(pad_Y, pad_X):
             if self.n_t == 1 and self.n_z == 1:
                 print(f"Image fits in RAM budget, using full mode")
-            return self._fuse_tiles_full_plane(z_level=z_level, time_idx=time_idx)
+            return self._fuse_tiles_full_plane(
+                z_level=z_level, time_idx=time_idx, output_time_idx=output_time_idx
+            )
 
         show_progress = self.n_t == 1 and self.n_z == 1
         if show_progress:
@@ -1115,7 +1207,7 @@ class TileFusion:
                 fused_block[mask] /= weight_sum[mask]
 
                 # Write to 5D output: (T, C, Z, Y, X)
-                self.fused_ts[time_idx, :, z_level, block_y:by_end, block_x:bx_end].write(
+                self.fused_ts[output_time_idx, :, z_level, block_y:by_end, block_x:bx_end].write(
                     fused_block.astype(np.uint16)
                 ).result()
 
@@ -1138,18 +1230,24 @@ class TileFusion:
         """Build NGFF multiscales by downsampling Y/X iteratively (not Z or T)."""
         inp = None
         for idx, factor in enumerate(factors):
-            out_path = omezarr_path / f"scale{idx + 1}" / "image"
+            out_path = omezarr_path / str(idx + 1)  # Standard OME-NGFF path: "1", "2", etc.
             if inp is not None:
                 del inp
-            prev = omezarr_path / f"scale{idx}" / "image"
+            prev = omezarr_path / str(idx)  # Previous level: "0", "1", etc.
+            driver = "zarr3" if self.zarr_version == 3 else "zarr"
             inp = ts.open(
-                {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(prev)}}
+                {"driver": driver, "kvstore": {"driver": "file", "path": str(prev)}}
             ).result()
 
             factor_to_use = factors[idx] // factors[idx - 1] if idx > 0 else factors[0]
             # 5D shape: (T, C, Z, Y, X)
             _, _, _, Y, X = inp.shape
             new_y, new_x = Y // factor_to_use, X // factor_to_use
+
+            # Skip this level if dimensions would be too small
+            if new_y == 0 or new_x == 0:
+                print(f"Skipping scale{idx + 1} (dimensions would be {new_y}x{new_x})")
+                break
 
             chunk_y = min(1024, new_y)
             chunk_x = min(1024, new_x)
@@ -1185,16 +1283,14 @@ class TileFusion:
                     down = down.astype(slab.dtype, copy=False)
                     self.fused_ts[:, :, :, y0 : y0 + by, x0 : x0 + bx].write(down).result()
 
-            write_scale_group_metadata(omezarr_path / f"scale{idx + 1}")
-
-    def _generate_ngff_zarr3_json(
+    def _generate_ngff_metadata(
         self,
         omezarr_path: Path,
         resolution_multiples: Sequence[Union[int, Sequence[int]]],
         dataset_name: str = "image",
         version: str = "0.5",
     ) -> None:
-        """Write OME-NGFF v0.5 multiscales JSON for Zarr3."""
+        """Write OME-NGFF v0.5 multiscales metadata."""
         write_ngff_metadata(
             omezarr_path,
             self._pixel_size,
@@ -1202,6 +1298,7 @@ class TileFusion:
             resolution_multiples,
             dataset_name,
             version,
+            self.zarr_version,
         )
 
     # -------------------------------------------------------------------------
@@ -1251,22 +1348,100 @@ class TileFusion:
         else:
             print(f"Output size: {self.padded_shape[0]} x {self.padded_shape[1]}")
 
-        scale0 = self.output_path / "scale0" / "image"
-        scale0.parent.mkdir(parents=True, exist_ok=True)
+        # Handle separate timepoints option
+        if self.separate_timepoints and self.n_t > 1:
+            self._run_separate_timepoints()
+        else:
+            self._run_single_output()
+
+        print(f"Done! Output: {self.output_path}")
+
+    def _run_single_output(self) -> None:
+        """Run fusion with all timepoints in a single file."""
+        scale0 = self.output_path / "0"  # Standard OME-NGFF path
+        scale0.mkdir(parents=True, exist_ok=True)
         self._create_fused_tensorstore(output_path=scale0)
 
         print("Fusing tiles...")
         self._fuse_tiles()
 
-        write_scale_group_metadata(self.output_path / "scale0")
-
         print("Building multiscale pyramid...")
         self._create_multiscales(self.output_path, factors=self.multiscale_factors)
-        self._generate_ngff_zarr3_json(
+        self._generate_ngff_metadata(
             self.output_path, resolution_multiples=self.resolution_multiples
         )
 
-        print(f"Done! Output: {self.output_path}")
+    def _run_separate_timepoints(self) -> None:
+        """Run fusion with each timepoint as a separate file."""
+        # Create output folder
+        output_folder = self.output_path
+        if output_folder.suffix == ".ome.zarr":
+            # Remove .ome.zarr suffix and use as folder
+            output_folder = output_folder.parent / output_folder.stem.replace(".ome", "")
+        output_folder.mkdir(parents=True, exist_ok=True)
+
+        print(f"Saving {self.n_t} timepoints as separate files...")
+
+        # Store original values that get modified during processing
+        original_n_t = self.n_t
+        original_padded_shape = self.padded_shape
+        original_chunk_y = self.chunk_y
+        original_chunk_x = self.chunk_x
+
+        # Process each timepoint separately
+        for t_idx in range(original_n_t):
+            print(f"\n{'='*60}")
+            print(f"Processing timepoint {t_idx + 1}/{original_n_t}")
+            print(f"{'='*60}")
+
+            # Restore values that get modified during multiscale creation
+            self.n_t = 1
+            self.padded_shape = original_padded_shape
+            self.chunk_y = original_chunk_y
+            self.chunk_x = original_chunk_x
+
+            # Create output for this timepoint
+            t_output = output_folder / f"t{t_idx}.ome.zarr"
+            scale0 = t_output / "0"  # Standard OME-NGFF path
+            scale0.mkdir(parents=True, exist_ok=True)
+            self._create_fused_tensorstore(output_path=scale0)
+
+            # Fuse only this timepoint
+            print(f"Fusing timepoint {t_idx}...")
+            self._fuse_tiles_single_timepoint(t_idx)
+
+            print(f"Building multiscale pyramid for timepoint {t_idx}...")
+            self._create_multiscales(t_output, factors=self.multiscale_factors)
+            self._generate_ngff_metadata(t_output, resolution_multiples=self.resolution_multiples)
+
+        # Restore original n_t
+        self.n_t = original_n_t
+
+        # Update output_path to folder
+        self.output_path = output_folder
+
+    def _fuse_tiles_single_timepoint(self, time_idx: int) -> None:
+        """Fuse tiles for a single timepoint.
+
+        When processing separate timepoints, this function writes to output index 0
+        regardless of the input time_idx, since each output file contains only one timepoint.
+
+        Parameters
+        ----------
+        time_idx : int
+            Input timepoint index to read from the source data.
+        """
+        for z in range(self.n_z):
+            if self.n_z > 1:
+                print(f"Fusing z-level {z + 1}/{self.n_z}...")
+
+            # Use existing fusion methods with specific time_idx
+            # Always write to output index 0 since we're creating single-timepoint outputs
+            mode = "blended" if self._blend_pixels != (0, 0) else "direct"
+            if mode == "direct":
+                self._fuse_tiles_direct_plane(z_level=z, time_idx=time_idx, output_time_idx=0)
+            else:
+                self._fuse_tiles_chunked_plane(z_level=z, time_idx=time_idx, output_time_idx=0)
 
     def stitch_all_regions(self) -> None:
         """Stitch all regions in the dataset, creating separate outputs per region.
@@ -1314,6 +1489,9 @@ class TileFusion:
                 channel_to_use=self.channel_to_use,
                 multiscale_downsample=self.multiscale_downsample,
                 region=region,
+                zarr_version=self.zarr_version,
+                separate_timepoints=self.separate_timepoints,
+                blend_bias=self._blend_bias,
             )
             tf.run()
 

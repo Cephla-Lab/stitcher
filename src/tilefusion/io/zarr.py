@@ -171,67 +171,99 @@ def create_zarr_store(
     chunk_shape: Tuple[int, ...],
     shard_chunk: Tuple[int, ...],
     max_workers: int = 8,
+    zarr_version: int = 2,
 ) -> ts.TensorStore:
     """
-    Create a Zarr v3 store with sharding codec.
+    Create a Zarr store with optional sharding codec.
 
     Parameters
     ----------
     output_path : Path
         Path for the Zarr store.
     shape : tuple
-        Full array shape (T, C, Y, X).
+        Full array shape (T, C, Z, Y, X).
     chunk_shape : tuple
-        Codec chunk shape.
+        Codec chunk shape (for v3 sharding) or main chunk shape (for v2).
     shard_chunk : tuple
-        Shard chunk shape.
+        Shard chunk shape (v3 only).
     max_workers : int
         I/O concurrency limit.
+    zarr_version : int
+        Zarr format version: 2 (default, napari-compatible) or 3 (with sharding).
 
     Returns
     -------
     store : ts.TensorStore
         Open TensorStore for writing.
     """
-    config = {
-        "context": {
-            "file_io_concurrency": {"limit": max_workers},
-            "data_copy_concurrency": {"limit": max_workers},
-        },
-        "driver": "zarr3",
-        "kvstore": {"driver": "file", "path": str(output_path)},
-        "metadata": {
-            "shape": list(shape),
-            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": list(shard_chunk)}},
-            "chunk_key_encoding": {"name": "default"},
-            "codecs": [
-                {
-                    "name": "sharding_indexed",
-                    "configuration": {
-                        "chunk_shape": list(chunk_shape),
-                        "codecs": [
-                            {"name": "bytes", "configuration": {"endian": "little"}},
-                            {
-                                "name": "blosc",
-                                "configuration": {
-                                    "cname": "zstd",
-                                    "clevel": 5,
-                                    "shuffle": "bitshuffle",
+    if zarr_version == 3:
+        # Zarr v3 with sharding (better performance, but not compatible with standard napari)
+        config = {
+            "context": {
+                "file_io_concurrency": {"limit": max_workers},
+                "data_copy_concurrency": {"limit": max_workers},
+            },
+            "driver": "zarr3",
+            "kvstore": {"driver": "file", "path": str(output_path)},
+            "metadata": {
+                "shape": list(shape),
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": {"chunk_shape": list(shard_chunk)},
+                },
+                "chunk_key_encoding": {"name": "default"},
+                "codecs": [
+                    {
+                        "name": "sharding_indexed",
+                        "configuration": {
+                            "chunk_shape": list(chunk_shape),
+                            "codecs": [
+                                {"name": "bytes", "configuration": {"endian": "little"}},
+                                {
+                                    "name": "blosc",
+                                    "configuration": {
+                                        "cname": "zstd",
+                                        "clevel": 5,
+                                        "shuffle": "bitshuffle",
+                                    },
                                 },
-                            },
-                        ],
-                        "index_codecs": [
-                            {"name": "bytes", "configuration": {"endian": "little"}},
-                            {"name": "crc32c"},
-                        ],
-                        "index_location": "end",
-                    },
-                }
-            ],
-            "data_type": "uint16",
-            "dimension_names": ["t", "c", "z", "y", "x"],
-        },
-    }
+                            ],
+                            "index_codecs": [
+                                {"name": "bytes", "configuration": {"endian": "little"}},
+                                {"name": "crc32c"},
+                            ],
+                            "index_location": "end",
+                        },
+                    }
+                ],
+                "data_type": "uint16",
+                "dimension_names": ["t", "c", "z", "y", "x"],
+            },
+        }
+    else:
+        # Zarr v2 (compatible with standard napari and most tools)
+        config = {
+            "context": {
+                "file_io_concurrency": {"limit": max_workers},
+                "data_copy_concurrency": {"limit": max_workers},
+            },
+            "driver": "zarr",
+            "kvstore": {"driver": "file", "path": str(output_path)},
+            "metadata": {
+                "shape": list(shape),
+                "chunks": list(chunk_shape),
+                "dtype": "<u2",  # uint16 little-endian
+                "order": "C",
+                "fill_value": 0,  # Explicitly set for napari compatibility
+                "dimension_separator": "/",  # Nested format for OME-NGFF compatibility
+                "compressor": {
+                    "id": "blosc",
+                    "cname": "zstd",
+                    "clevel": 5,
+                    "shuffle": 2,  # bitshuffle
+                },
+            },
+        }
 
     return ts.open(config, create=True, open=True).result()
 
@@ -242,10 +274,11 @@ def write_ngff_metadata(
     center: Tuple[float, float],
     resolution_multiples: Sequence[Union[int, Sequence[int]]],
     dataset_name: str = "image",
-    version: str = "0.5",
+    version: str | None = None,
+    zarr_version: int = 2,
 ) -> None:
     """
-    Write OME-NGFF v0.5 multiscales JSON for Zarr3.
+    Write OME-NGFF multiscales metadata for Zarr.
 
     Parameters
     ----------
@@ -260,8 +293,12 @@ def write_ngff_metadata(
     dataset_name : str
         Name of the dataset node.
     version : str
-        NGFF version.
+        NGFF version. Defaults to "0.4" for Zarr v2 and "0.5" for Zarr v3.
     """
+    # Default version based on zarr_version
+    if version is None:
+        version = "0.4" if zarr_version == 2 else "0.5"
+
     axes = [
         {"name": "t", "type": "time"},
         {"name": "c", "type": "channel"},
@@ -291,7 +328,7 @@ def write_ngff_metadata(
             ]
         datasets.append(
             {
-                "path": f"scale{lvl}/{dataset_name}",
+                "path": str(lvl),  # Standard OME-NGFF path: "0", "1", "2", etc.
                 "coordinateTransformations": [
                     {"type": "scale", "scale": scale},
                     {"type": "translation", "translation": translation},
@@ -301,27 +338,58 @@ def write_ngff_metadata(
         prev_sp = spatial
 
     mult = {
+        "version": version,
         "axes": axes,
         "datasets": datasets,
         "name": dataset_name,
         "@type": "ngff:Image",
     }
-    metadata = {
-        "attributes": {"ome": {"version": version, "multiscales": [mult]}},
-        "zarr_format": 3,
-        "node_type": "group",
-    }
-    with open(omezarr_path / "zarr.json", "w") as f:
-        json.dump(metadata, f, indent=2)
+
+    if zarr_version == 3:
+        # Zarr v3 format
+        metadata = {
+            "attributes": {"ome": {"version": version, "multiscales": [mult]}},
+            "zarr_format": 3,
+            "node_type": "group",
+        }
+        with open(omezarr_path / "zarr.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+    else:
+        # Zarr v2 format
+        metadata = {"multiscales": [mult]}
+        # Write .zgroup file
+        with open(omezarr_path / ".zgroup", "w") as f:
+            json.dump({"zarr_format": 2}, f)
+        # Write .zattrs file with OME metadata
+        with open(omezarr_path / ".zattrs", "w") as f:
+            json.dump(metadata, f, indent=2)
 
 
-def write_scale_group_metadata(scale_path: Path) -> None:
-    """Write zarr.json for a scale group."""
-    ngff = {
-        "attributes": {"_ARRAY_DIMENSIONS": ["t", "c", "z", "y", "x"]},
-        "zarr_format": 3,
-        "node_type": "group",
-    }
+def write_scale_group_metadata(scale_path: Path, zarr_version: int = 2) -> None:
+    """Write metadata for a scale group.
+
+    Parameters
+    ----------
+    scale_path : Path
+        Path to the scale group directory.
+    zarr_version : int
+        Zarr format version: 2 (default) or 3.
+    """
     scale_path.mkdir(parents=True, exist_ok=True)
-    with open(scale_path / "zarr.json", "w") as f:
-        json.dump(ngff, f, indent=2)
+
+    if zarr_version == 3:
+        # Zarr v3 format
+        ngff = {
+            "attributes": {"_ARRAY_DIMENSIONS": ["t", "c", "z", "y", "x"]},
+            "zarr_format": 3,
+            "node_type": "group",
+        }
+        with open(scale_path / "zarr.json", "w") as f:
+            json.dump(ngff, f, indent=2)
+    else:
+        # Zarr v2 format
+        ngff = {"_ARRAY_DIMENSIONS": ["t", "c", "z", "y", "x"]}
+        with open(scale_path / ".zgroup", "w") as f:
+            json.dump({"zarr_format": 2}, f)
+        with open(scale_path / ".zattrs", "w") as f:
+            json.dump(ngff, f, indent=2)
