@@ -207,7 +207,10 @@ def create_zarr_store(
             "kvstore": {"driver": "file", "path": str(output_path)},
             "metadata": {
                 "shape": list(shape),
-                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": list(shard_chunk)}},
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": {"chunk_shape": list(shard_chunk)},
+                },
                 "chunk_key_encoding": {"name": "default"},
                 "codecs": [
                     {
@@ -353,9 +356,7 @@ def write_ngff_metadata(
             json.dump(metadata, f, indent=2)
     else:
         # Zarr v2 format
-        metadata = {
-            "multiscales": [mult]
-        }
+        metadata = {"multiscales": [mult]}
         # Write .zgroup file
         with open(omezarr_path / ".zgroup", "w") as f:
             json.dump({"zarr_format": 2}, f)
@@ -387,9 +388,7 @@ def write_scale_group_metadata(scale_path: Path, zarr_version: int = 2) -> None:
             json.dump(ngff, f, indent=2)
     else:
         # Zarr v2 format
-        ngff = {
-            "_ARRAY_DIMENSIONS": ["t", "c", "z", "y", "x"]
-        }
+        ngff = {"_ARRAY_DIMENSIONS": ["t", "c", "z", "y", "x"]}
         with open(scale_path / ".zgroup", "w") as f:
             json.dump({}, f)
         with open(scale_path / ".zattrs", "w") as f:
