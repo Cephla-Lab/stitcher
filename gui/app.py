@@ -115,6 +115,53 @@ QPushButton#calcFlatfieldButton:disabled {
 }
 """
 
+# RGB values for channel colormaps (matching Napari visualization)
+CHANNEL_COLOR_MAP = {
+    "blue": (0, 0, 255),
+    "green": (0, 255, 0),
+    "yellow": (255, 255, 0),
+    "red": (255, 0, 0),
+    "magenta": (255, 0, 255),
+    "cyan": (0, 255, 255),
+}
+
+CHANNEL_COLORS = ["blue", "green", "yellow", "red", "magenta", "cyan"]
+
+
+def auto_contrast(data, pmax=99.9):
+    """Compute contrast limits optimized for fluorescence microscopy.
+
+    Uses mode-based background detection: finds the histogram peak
+    (background) and sets minimum above it. This effectively
+    suppresses background while preserving signal.
+    """
+    import numpy as np
+
+    flat = data.ravel()
+    if len(flat) > 100000:
+        flat = np.random.choice(flat, 100000, replace=False)
+
+    # Find histogram peak (mode) - this is the background
+    hist, bin_edges = np.histogram(flat, bins=256)
+    mode_idx = np.argmax(hist)
+    mode_val = (bin_edges[mode_idx] + bin_edges[mode_idx + 1]) / 2
+
+    # Estimate background noise (std of values below median)
+    background_pixels = flat[flat <= np.median(flat)]
+    if len(background_pixels) > 0:
+        bg_std = np.std(background_pixels)
+    else:
+        bg_std = mode_val * 0.1
+
+    # Set min to mode + 2*std (above background noise)
+    lo = mode_val + 2 * bg_std
+    hi = np.percentile(data, pmax)
+
+    # Ensure minimum range
+    if hi - lo < 10:
+        hi = lo + 100
+    return float(lo), float(hi)
+
 
 class PreviewWorker(QThread):
     """Worker thread for running preview stitching on subset of tiles."""
@@ -180,16 +227,12 @@ class PreviewWorker(QThread):
             half_rows, half_cols = self.preview_rows // 2, self.preview_cols // 2
 
             selected_indices = []
-            selected_grid_pos = []  # Track (row, col) for coloring
             for row in range(center_row - half_rows, center_row - half_rows + self.preview_rows):
                 for col in range(
                     center_col - half_cols, center_col - half_cols + self.preview_cols
                 ):
                     if (row, col) in grid:
                         selected_indices.append(grid[(row, col)])
-                        selected_grid_pos.append(
-                            (row - (center_row - half_rows), col - (center_col - half_cols))
-                        )
 
             self.progress.emit(f"Selected {len(selected_indices)} tiles")
 
@@ -246,58 +289,73 @@ class PreviewWorker(QThread):
             fused = np.zeros((h, w), dtype=np.float32)
             weight = np.zeros((h, w), dtype=np.float32)
 
-            checkerboard_colors = [
-                (255, 100, 100),
-                (100, 255, 100),
-                (100, 100, 255),
-                (255, 255, 100),
-                (255, 100, 255),
-                (100, 255, 255),
-            ]
+            # First pass: compute GLOBAL contrast limits per channel
+            self.progress.emit("Computing global contrast...")
+            channel_data = {c: [] for c in range(tf_full.channels)}
 
-            def get_color(row, col):
-                return checkerboard_colors[((row % 2) * 3 + (col % 3)) % 6]
-
-            # Read tiles using TileFusion's format-aware methods
-            for i, (pos, orig_idx) in enumerate(zip(selected_positions, selected_indices)):
+            for orig_idx in selected_indices:
                 arr = tf_full._read_tile(orig_idx)
-                if arr.ndim == 3:
-                    arr = arr[0]  # Take first channel for preview
-                arr_raw = arr.astype(np.float32)
+                if arr.ndim == 2:
+                    arr = arr[np.newaxis, ...]
+                for c in range(arr.shape[0]):
+                    # Sample from each tile for global contrast
+                    flat = arr[c].ravel()
+                    if len(flat) > 10000:
+                        flat = np.random.choice(flat, 10000, replace=False)
+                    channel_data[c].append(flat)
 
-                p1, p99 = np.percentile(arr_raw, [2, 98])
-                arr_norm = np.clip((arr_raw - p1) / (p99 - p1 + 1e-6), 0, 1)
+            # Compute global contrast per channel
+            global_contrast = {}
+            for c in channel_data:
+                combined = np.concatenate(channel_data[c])
+                global_contrast[c] = auto_contrast(combined)
 
-                grid_row, grid_col = selected_grid_pos[i]
-                color = get_color(grid_row, grid_col)
+            # Second pass: render tiles with global contrast
+            self.progress.emit("Rendering tiles...")
+            for i, (pos, orig_idx) in enumerate(zip(selected_positions, selected_indices)):
+                # Read ALL channels (not just first)
+                arr = tf_full._read_tile(orig_idx)
+                if arr.ndim == 2:
+                    arr = arr[np.newaxis, ...]
 
+                n_ch, th, tw = arr.shape[0], arr.shape[1], arr.shape[2]
+
+                # Create RGB composite with channel colors
+                tile_rgb = np.zeros((th, tw, 3), dtype=np.float32)
+                for c in range(n_ch):
+                    arr_ch = arr[c].astype(np.float32)
+
+                    # Use GLOBAL contrast (computed across all tiles)
+                    lo, hi = global_contrast[c]
+                    arr_norm = np.clip((arr_ch - lo) / (hi - lo + 1e-6), 0, 1)
+
+                    color_name = CHANNEL_COLORS[c % len(CHANNEL_COLORS)]
+                    rgb = CHANNEL_COLOR_MAP[color_name]
+                    for rgb_idx in range(3):
+                        tile_rgb[:, :, rgb_idx] += arr_norm * (rgb[rgb_idx] / 255.0)
+
+                tile_rgb = (np.clip(tile_rgb, 0, 1) * 255).astype(np.uint8)
+
+                # Calculate positions (tile_rgb computed once, placed at two positions)
                 oy_before = int(round((pos[0] - min_y) / pixel_size[0]))
                 ox_before = int(round((pos[1] - min_x) / pixel_size[1]))
                 oy_after = oy_before + int(global_offsets[i][0])
                 ox_after = ox_before + int(global_offsets[i][1])
 
-                th, tw = arr_norm.shape
-
-                # BEFORE
+                # BEFORE placement
                 y1, y2 = max(0, oy_before), min(oy_before + th, h)
                 x1, x2 = max(0, ox_before), min(ox_before + tw, w)
                 if y2 > y1 and x2 > x1:
                     tile_h, tile_w = y2 - y1, x2 - x1
-                    for c in range(3):
-                        color_before[y1:y2, x1:x2, c] = (
-                            arr_norm[:tile_h, :tile_w] * color[c]
-                        ).astype(np.uint8)
+                    color_before[y1:y2, x1:x2] = tile_rgb[:tile_h, :tile_w]
 
-                # AFTER
+                # AFTER placement
                 y1, y2 = max(0, oy_after), min(oy_after + th, h)
                 x1, x2 = max(0, ox_after), min(ox_after + tw, w)
                 if y2 > y1 and x2 > x1:
                     tile_h, tile_w = y2 - y1, x2 - x1
-                    for c in range(3):
-                        color_after[y1:y2, x1:x2, c] = (
-                            arr_norm[:tile_h, :tile_w] * color[c]
-                        ).astype(np.uint8)
-                    fused[y1:y2, x1:x2] += arr_raw[:tile_h, :tile_w]
+                    color_after[y1:y2, x1:x2] = tile_rgb[:tile_h, :tile_w]
+                    fused[y1:y2, x1:x2] += arr.mean(axis=0)[:tile_h, :tile_w].astype(np.float32)
                     weight[y1:y2, x1:x2] += 1.0
 
             weight = np.maximum(weight, 1.0)
@@ -1404,41 +1462,7 @@ class StitcherGUI(QMainWindow):
             except:
                 pass
 
-            channel_colors = ["blue", "green", "yellow", "red", "magenta", "cyan"]
-
-            def auto_contrast(data, pmax=99.9):
-                """Compute contrast limits optimized for fluorescence microscopy.
-
-                Uses mode-based background detection: finds the histogram peak
-                (background) and sets minimum above it. This effectively
-                suppresses background while preserving signal.
-                """
-                # Estimate background using histogram mode
-                # Sample data for speed if large
-                flat = data.ravel()
-                if len(flat) > 100000:
-                    flat = np.random.choice(flat, 100000, replace=False)
-
-                # Find histogram peak (mode) - this is the background
-                hist, bin_edges = np.histogram(flat, bins=256)
-                mode_idx = np.argmax(hist)
-                mode_val = (bin_edges[mode_idx] + bin_edges[mode_idx + 1]) / 2
-
-                # Estimate background noise (std of values below median)
-                background_pixels = flat[flat <= np.median(flat)]
-                if len(background_pixels) > 0:
-                    bg_std = np.std(background_pixels)
-                else:
-                    bg_std = mode_val * 0.1
-
-                # Set min to mode + 2*std (above background noise)
-                lo = mode_val + 2 * bg_std
-                hi = np.percentile(data, pmax)
-
-                # Ensure minimum range
-                if hi - lo < 10:
-                    hi = lo + 100
-                return [float(lo), float(hi)]
+            # Use module-level CHANNEL_COLORS and auto_contrast
 
             def dtype_range(dtype):
                 """Get valid range for a numpy dtype."""
@@ -1477,7 +1501,7 @@ class StitcherGUI(QMainWindow):
                     layer = viewer.add_image(
                         data,
                         name=name,
-                        colormap=channel_colors[c % len(channel_colors)],
+                        colormap=CHANNEL_COLORS[c % len(CHANNEL_COLORS)],
                         blending="additive",
                         contrast_limits=contrast,
                     )
@@ -1508,7 +1532,7 @@ class StitcherGUI(QMainWindow):
                         channel_pyramid,
                         multiscale=True,
                         name=name,
-                        colormap=channel_colors[c % len(channel_colors)],
+                        colormap=CHANNEL_COLORS[c % len(CHANNEL_COLORS)],
                         blending="additive",
                         contrast_limits=contrast,
                     )
