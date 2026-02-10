@@ -131,6 +131,8 @@ class PreviewWorker(QThread):
         downsample_factor,
         flatfield=None,
         darkfield=None,
+        registration_z=None,
+        registration_t=0,
     ):
         super().__init__()
         self.tiff_path = tiff_path
@@ -139,6 +141,8 @@ class PreviewWorker(QThread):
         self.downsample_factor = downsample_factor
         self.flatfield = flatfield
         self.darkfield = darkfield
+        self.registration_z = registration_z
+        self.registration_t = registration_t
 
     def run(self):
         try:
@@ -153,6 +157,8 @@ class PreviewWorker(QThread):
                 downsample_factors=(self.downsample_factor, self.downsample_factor),
                 flatfield=self.flatfield,
                 darkfield=self.darkfield,
+                registration_z=self.registration_z,
+                registration_t=self.registration_t,
             )
 
             positions = np.array(tf_full._tile_positions)
@@ -198,7 +204,10 @@ class PreviewWorker(QThread):
 
             # Create a new TileFusion for the subset
             tf = TileFusion(
-                self.tiff_path, downsample_factors=(self.downsample_factor, self.downsample_factor)
+                self.tiff_path,
+                downsample_factors=(self.downsample_factor, self.downsample_factor),
+                registration_z=self.registration_z,
+                registration_t=self.registration_t,
             )
             tf._tile_positions = selected_positions
             tf.n_tiles = len(selected_indices)
@@ -328,6 +337,8 @@ class FusionWorker(QThread):
         fusion_mode="blended",
         flatfield=None,
         darkfield=None,
+        registration_z=None,
+        registration_t=0,
     ):
         super().__init__()
         self.tiff_path = tiff_path
@@ -337,6 +348,8 @@ class FusionWorker(QThread):
         self.fusion_mode = fusion_mode
         self.flatfield = flatfield
         self.darkfield = darkfield
+        self.registration_z = registration_z
+        self.registration_t = registration_t
         self.output_path = None
 
     def run(self):
@@ -379,6 +392,8 @@ class FusionWorker(QThread):
                 downsample_factors=(self.downsample_factor, self.downsample_factor),
                 flatfield=self.flatfield,
                 darkfield=self.darkfield,
+                registration_z=self.registration_z,
+                registration_t=self.registration_t,
             )
             load_time = time.time() - step_start
             self.progress.emit(f"Loaded {tf.n_tiles} tiles ({tf.Y}x{tf.X} each) [{load_time:.1f}s]")
@@ -714,6 +729,10 @@ class StitcherGUI(QMainWindow):
         self.darkfield = None  # Shape (C, Y, X) or None
         self.flatfield_worker = None
 
+        # Dataset dimension state (for registration z/t selection)
+        self.dataset_n_z = 1
+        self.dataset_n_t = 1
+
         self.setup_ui()
 
     def setup_ui(self):
@@ -887,6 +906,30 @@ class StitcherGUI(QMainWindow):
         downsample_layout.addStretch()
         settings_layout.addWidget(self.downsample_widget)
 
+        # Registration z/t selection (shown when registration enabled AND multi-z/t dataset)
+        self.reg_zt_widget = QWidget()
+        self.reg_zt_widget.setVisible(False)
+        reg_zt_layout = QHBoxLayout(self.reg_zt_widget)
+        reg_zt_layout.setContentsMargins(20, 0, 0, 0)
+        self.reg_z_label = QLabel("Z-level:")
+        reg_zt_layout.addWidget(self.reg_z_label)
+        self.reg_z_spin = QSpinBox()
+        self.reg_z_spin.setRange(0, 0)
+        self.reg_z_spin.setValue(0)
+        self.reg_z_spin.setToolTip("Z-level to use for registration")
+        self.reg_z_spin.setFixedWidth(60)
+        reg_zt_layout.addWidget(self.reg_z_spin)
+        self.reg_t_label = QLabel("Timepoint:")
+        reg_zt_layout.addWidget(self.reg_t_label)
+        self.reg_t_spin = QSpinBox()
+        self.reg_t_spin.setRange(0, 0)
+        self.reg_t_spin.setValue(0)
+        self.reg_t_spin.setToolTip("Timepoint to use for registration")
+        self.reg_t_spin.setFixedWidth(60)
+        reg_zt_layout.addWidget(self.reg_t_spin)
+        reg_zt_layout.addStretch()
+        settings_layout.addWidget(self.reg_zt_widget)
+
         self.blend_checkbox = QCheckBox("Enable blending")
         self.blend_checkbox.setChecked(False)
         self.blend_checkbox.toggled.connect(self.on_blend_toggled)
@@ -978,6 +1021,22 @@ class StitcherGUI(QMainWindow):
         self.clear_flatfield_button.setEnabled(False)
         self.save_flatfield_button.setEnabled(False)
 
+        # Load dataset dimensions for registration z/t selection
+        try:
+            from tilefusion import TileFusion
+
+            tf_temp = TileFusion(file_path)
+            self.dataset_n_z = tf_temp.n_z
+            self.dataset_n_t = tf_temp.n_t
+            tf_temp.close()
+            if self.dataset_n_z > 1 or self.dataset_n_t > 1:
+                self.log(f"Dataset: {self.dataset_n_z} z-levels, {self.dataset_n_t} timepoints")
+            self._update_reg_zt_controls()
+        except Exception:
+            self.dataset_n_z = 1
+            self.dataset_n_t = 1
+            self._update_reg_zt_controls()
+
         # Auto-load existing flatfield if present, otherwise disable correction
         # For directories (SQUID folders), also check inside the directory
         if path.is_dir():
@@ -997,6 +1056,32 @@ class StitcherGUI(QMainWindow):
 
     def on_registration_toggled(self, checked):
         self.downsample_widget.setVisible(checked)
+        self._update_reg_zt_controls()
+
+    def _update_reg_zt_controls(self):
+        """Update visibility and ranges of registration z/t controls."""
+        registration_enabled = self.registration_checkbox.isChecked()
+        has_multi_z = self.dataset_n_z > 1
+        has_multi_t = self.dataset_n_t > 1
+
+        # Show z/t widget only when registration is enabled AND dataset has multi-z or multi-t
+        show_zt = registration_enabled and (has_multi_z or has_multi_t)
+        self.reg_zt_widget.setVisible(show_zt)
+
+        if show_zt:
+            # Update z spinbox
+            self.reg_z_label.setVisible(has_multi_z)
+            self.reg_z_spin.setVisible(has_multi_z)
+            if has_multi_z:
+                self.reg_z_spin.setRange(0, self.dataset_n_z - 1)
+                self.reg_z_spin.setValue(self.dataset_n_z // 2)  # Default to middle
+
+            # Update t spinbox
+            self.reg_t_label.setVisible(has_multi_t)
+            self.reg_t_spin.setVisible(has_multi_t)
+            if has_multi_t:
+                self.reg_t_spin.setRange(0, self.dataset_n_t - 1)
+                self.reg_t_spin.setValue(0)  # Default to first timepoint
 
     def on_blend_toggled(self, checked):
         self.blend_value_widget.setVisible(checked)
@@ -1228,6 +1313,10 @@ class StitcherGUI(QMainWindow):
         flatfield = self.flatfield if self.flatfield_checkbox.isChecked() else None
         darkfield = self.darkfield if self.flatfield_checkbox.isChecked() else None
 
+        # Get registration z/t values (None means use default middle z)
+        registration_z = self.reg_z_spin.value() if self.dataset_n_z > 1 else None
+        registration_t = self.reg_t_spin.value() if self.dataset_n_t > 1 else 0
+
         self.worker = FusionWorker(
             self.drop_area.file_path,
             self.registration_checkbox.isChecked(),
@@ -1236,6 +1325,8 @@ class StitcherGUI(QMainWindow):
             fusion_mode,
             flatfield=flatfield,
             darkfield=darkfield,
+            registration_z=registration_z,
+            registration_t=registration_t,
         )
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.on_fusion_finished)
@@ -1294,6 +1385,10 @@ class StitcherGUI(QMainWindow):
         flatfield = self.flatfield if self.flatfield_checkbox.isChecked() else None
         darkfield = self.darkfield if self.flatfield_checkbox.isChecked() else None
 
+        # Get registration z/t values (None means use default middle z)
+        registration_z = self.reg_z_spin.value() if self.dataset_n_z > 1 else None
+        registration_t = self.reg_t_spin.value() if self.dataset_n_t > 1 else 0
+
         self.preview_worker = PreviewWorker(
             self.drop_area.file_path,
             self.preview_cols_spin.value(),
@@ -1301,6 +1396,8 @@ class StitcherGUI(QMainWindow):
             self.downsample_spin.value(),
             flatfield=flatfield,
             darkfield=darkfield,
+            registration_z=registration_z,
+            registration_t=registration_t,
         )
         self.preview_worker.progress.connect(self.log)
         self.preview_worker.finished.connect(self.on_preview_finished)
