@@ -133,6 +133,7 @@ class PreviewWorker(QThread):
         darkfield=None,
         registration_z=None,
         registration_t=0,
+        registration_channel=0,
     ):
         super().__init__()
         self.tiff_path = tiff_path
@@ -143,6 +144,7 @@ class PreviewWorker(QThread):
         self.darkfield = darkfield
         self.registration_z = registration_z
         self.registration_t = registration_t
+        self.registration_channel = registration_channel
 
     def run(self):
         try:
@@ -159,6 +161,7 @@ class PreviewWorker(QThread):
                 darkfield=self.darkfield,
                 registration_z=self.registration_z,
                 registration_t=self.registration_t,
+                channel_to_use=self.registration_channel,
             )
 
             positions = np.array(tf_full._tile_positions)
@@ -208,6 +211,7 @@ class PreviewWorker(QThread):
                 downsample_factors=(self.downsample_factor, self.downsample_factor),
                 registration_z=self.registration_z,
                 registration_t=self.registration_t,
+                channel_to_use=self.registration_channel,
             )
             tf._tile_positions = selected_positions
             tf.n_tiles = len(selected_indices)
@@ -339,6 +343,7 @@ class FusionWorker(QThread):
         darkfield=None,
         registration_z=None,
         registration_t=0,
+        registration_channel=0,
     ):
         super().__init__()
         self.tiff_path = tiff_path
@@ -350,6 +355,7 @@ class FusionWorker(QThread):
         self.darkfield = darkfield
         self.registration_z = registration_z
         self.registration_t = registration_t
+        self.registration_channel = registration_channel
         self.output_path = None
 
     def run(self):
@@ -394,6 +400,7 @@ class FusionWorker(QThread):
                 darkfield=self.darkfield,
                 registration_z=self.registration_z,
                 registration_t=self.registration_t,
+                channel_to_use=self.registration_channel,
             )
             load_time = time.time() - step_start
             self.progress.emit(f"Loaded {tf.n_tiles} tiles ({tf.Y}x{tf.X} each) [{load_time:.1f}s]")
@@ -732,6 +739,8 @@ class StitcherGUI(QMainWindow):
         # Dataset dimension state (for registration z/t selection)
         self.dataset_n_z = 1
         self.dataset_n_t = 1
+        self.dataset_n_channels = 1
+        self.dataset_channel_names = []
 
         self.setup_ui()
 
@@ -927,6 +936,12 @@ class StitcherGUI(QMainWindow):
         self.reg_t_spin.setToolTip("Timepoint to use for registration")
         self.reg_t_spin.setFixedWidth(60)
         reg_zt_layout.addWidget(self.reg_t_spin)
+        self.reg_channel_label = QLabel("Channel:")
+        reg_zt_layout.addWidget(self.reg_channel_label)
+        self.reg_channel_combo = QComboBox()
+        self.reg_channel_combo.setToolTip("Channel to use for registration")
+        self.reg_channel_combo.setMinimumWidth(120)
+        reg_zt_layout.addWidget(self.reg_channel_combo)
         reg_zt_layout.addStretch()
         settings_layout.addWidget(self.reg_zt_widget)
 
@@ -1028,6 +1043,13 @@ class StitcherGUI(QMainWindow):
             tf_temp = TileFusion(file_path)
             self.dataset_n_z = tf_temp.n_z
             self.dataset_n_t = tf_temp.n_t
+            self.dataset_n_channels = tf_temp.channels
+            if "channel_names" in tf_temp._metadata:
+                self.dataset_channel_names = tf_temp._metadata["channel_names"]
+            else:
+                self.dataset_channel_names = [
+                    f"Channel {i}" for i in range(self.dataset_n_channels)
+                ]
             tf_temp.close()
             if self.dataset_n_z > 1 or self.dataset_n_t > 1:
                 self.log(f"Dataset: {self.dataset_n_z} z-levels, {self.dataset_n_t} timepoints")
@@ -1035,6 +1057,8 @@ class StitcherGUI(QMainWindow):
         except Exception:
             self.dataset_n_z = 1
             self.dataset_n_t = 1
+            self.dataset_n_channels = 1
+            self.dataset_channel_names = []
             self._update_reg_zt_controls()
 
         # Auto-load existing flatfield if present, otherwise disable correction
@@ -1063,9 +1087,10 @@ class StitcherGUI(QMainWindow):
         registration_enabled = self.registration_checkbox.isChecked()
         has_multi_z = self.dataset_n_z > 1
         has_multi_t = self.dataset_n_t > 1
+        has_multi_channel = self.dataset_n_channels > 1
 
-        # Show z/t widget only when registration is enabled AND dataset has multi-z or multi-t
-        show_zt = registration_enabled and (has_multi_z or has_multi_t)
+        # Show z/t widget only when registration is enabled AND dataset has multi-z or multi-t or multi-channel
+        show_zt = registration_enabled and (has_multi_z or has_multi_t or has_multi_channel)
         self.reg_zt_widget.setVisible(show_zt)
 
         if show_zt:
@@ -1082,6 +1107,14 @@ class StitcherGUI(QMainWindow):
             if has_multi_t:
                 self.reg_t_spin.setRange(0, self.dataset_n_t - 1)
                 self.reg_t_spin.setValue(0)  # Default to first timepoint
+
+            # Update channel combo
+            self.reg_channel_label.setVisible(has_multi_channel)
+            self.reg_channel_combo.setVisible(has_multi_channel)
+            if has_multi_channel:
+                self.reg_channel_combo.clear()
+                self.reg_channel_combo.addItems(self.dataset_channel_names)
+                self.reg_channel_combo.setCurrentIndex(0)
 
     def on_blend_toggled(self, checked):
         self.blend_value_widget.setVisible(checked)
@@ -1316,6 +1349,9 @@ class StitcherGUI(QMainWindow):
         # Get registration z/t values (None means use default middle z)
         registration_z = self.reg_z_spin.value() if self.dataset_n_z > 1 else None
         registration_t = self.reg_t_spin.value() if self.dataset_n_t > 1 else 0
+        registration_channel = (
+            self.reg_channel_combo.currentIndex() if self.dataset_n_channels > 1 else 0
+        )
 
         self.worker = FusionWorker(
             self.drop_area.file_path,
@@ -1327,6 +1363,7 @@ class StitcherGUI(QMainWindow):
             darkfield=darkfield,
             registration_z=registration_z,
             registration_t=registration_t,
+            registration_channel=registration_channel,
         )
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.on_fusion_finished)
@@ -1388,6 +1425,9 @@ class StitcherGUI(QMainWindow):
         # Get registration z/t values (None means use default middle z)
         registration_z = self.reg_z_spin.value() if self.dataset_n_z > 1 else None
         registration_t = self.reg_t_spin.value() if self.dataset_n_t > 1 else 0
+        registration_channel = (
+            self.reg_channel_combo.currentIndex() if self.dataset_n_channels > 1 else 0
+        )
 
         self.preview_worker = PreviewWorker(
             self.drop_area.file_path,
@@ -1398,6 +1438,7 @@ class StitcherGUI(QMainWindow):
             darkfield=darkfield,
             registration_z=registration_z,
             registration_t=registration_t,
+            registration_channel=registration_channel,
         )
         self.preview_worker.progress.connect(self.log)
         self.preview_worker.finished.connect(self.on_preview_finished)
