@@ -724,7 +724,7 @@ class StitcherGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Stitcher")
-        self.setMinimumSize(500, 850)
+        self.setMinimumSize(580, 850)
 
         self.worker = None
         self.output_path = None
