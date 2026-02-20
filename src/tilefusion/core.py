@@ -833,11 +833,11 @@ class TileFusion:
             expected_dy = stage_diff[0] / self._pixel_size[0]
             expected_dx = stage_diff[1] / self._pixel_size[1]
 
-            # Compute ratio for non-zero shifts
-            if abs(dx_measured) > 5:  # Horizontal shift
+            # Compute ratio for non-zero shifts (both expected and measured must be significant)
+            if abs(dx_measured) > 5 and abs(expected_dx) > 5:  # Horizontal shift
                 ratio = expected_dx / dx_measured
                 ratios.append(ratio)
-            if abs(dy_measured) > 5:  # Vertical shift
+            if abs(dy_measured) > 5 and abs(expected_dy) > 5:  # Vertical shift
                 ratio = expected_dy / dy_measured
                 ratios.append(ratio)
 

@@ -243,8 +243,8 @@ class PreviewWorker(QThread):
                 self.progress.emit(
                     f"Estimated pixel size: {estimated_px:.4f} µm ({deviation:+.1f}% from metadata)"
                 )
-            except ValueError:
-                pass  # Not enough pairs for estimation
+            except ValueError as e:
+                self.progress.emit(f"Pixel size estimation skipped: {e}")
 
             tf.optimize_shifts(
                 method="TWO_ROUND_ITERATIVE", rel_thresh=0.5, abs_thresh=2.0, iterative=True
@@ -444,8 +444,14 @@ class FusionWorker(QThread):
                         f"Estimated pixel size: {estimated_px:.4f} µm ({deviation:+.1f}% from metadata)"
                     )
                     if self.use_estimated_pixel_size and abs(deviation) > 1.0:
-                        tf._pixel_size = (estimated_px, estimated_px)
-                        self.progress.emit("Using estimated pixel size for stitching")
+                        # Sanity check: estimated should be within 50% of original
+                        if 0.5 < estimated_px / tf._pixel_size[0] < 2.0:
+                            tf._pixel_size = (estimated_px, estimated_px)
+                            self.progress.emit("Using estimated pixel size for stitching")
+                        else:
+                            self.progress.emit(
+                                f"Warning: Estimated pixel size {estimated_px:.4f} is unreasonable, ignoring"
+                            )
                 except ValueError as e:
                     self.progress.emit(f"Could not estimate pixel size: {e}")
             else:
@@ -761,7 +767,6 @@ class StitcherGUI(QMainWindow):
         # Dataset dimension state (for registration z/t selection)
         self.dataset_n_z = 1
         self.dataset_n_t = 1
-        self.estimated_pixel_size = None
         self.dataset_n_channels = 1
         self.dataset_channel_names = []
 
