@@ -84,6 +84,10 @@ class TileFusion:
         Channel index for registration.
     multiscale_downsample : str
         Either "stride" (default) or "block_mean" to control multiscale reduction.
+    registration_z : int, optional
+        Z-level to use for registration. If None, uses middle z-level.
+    registration_t : int
+        Timepoint to use for registration. Defaults to 0.
     """
 
     def __init__(
@@ -461,7 +465,9 @@ class TileFusion:
     # I/O methods (delegate to format-specific loaders)
     # -------------------------------------------------------------------------
 
-    def _read_tile(self, tile_idx: int, z_level: int = None, time_idx: int = None) -> np.ndarray:
+    def _read_tile(
+        self, tile_idx: int, z_level: Optional[int] = None, time_idx: Optional[int] = None
+    ) -> np.ndarray:
         """Read a single tile from the input data (all channels)."""
         if z_level is None:
             z_level = self._registration_z  # Default to registration z-level
@@ -471,7 +477,7 @@ class TileFusion:
         if self._is_zarr_format:
             zarr_ts = self._metadata["tensorstore"]
             is_3d = self._metadata.get("is_3d", False)
-            tile = read_zarr_tile(zarr_ts, tile_idx, is_3d)
+            tile = read_zarr_tile(zarr_ts, tile_idx, is_3d, z_level=z_level, time_idx=time_idx)
         elif self._is_individual_tiffs_format:
             tile = read_individual_tiffs_tile(
                 self._metadata["image_folder"],
@@ -508,8 +514,8 @@ class TileFusion:
         tile_idx: int,
         y_slice: slice,
         x_slice: slice,
-        z_level: int = None,
-        time_idx: int = None,
+        z_level: Optional[int] = None,
+        time_idx: Optional[int] = None,
     ) -> np.ndarray:
         """Read a region of a tile from the input data."""
         if z_level is None:
@@ -521,7 +527,14 @@ class TileFusion:
             zarr_ts = self._metadata["tensorstore"]
             is_3d = self._metadata.get("is_3d", False)
             region = read_zarr_region(
-                zarr_ts, tile_idx, y_slice, x_slice, self.channel_to_use, is_3d
+                zarr_ts,
+                tile_idx,
+                y_slice,
+                x_slice,
+                self.channel_to_use,
+                is_3d,
+                z_level=z_level,
+                time_idx=time_idx,
             )
         elif self._is_individual_tiffs_format:
             region = read_individual_tiffs_region(

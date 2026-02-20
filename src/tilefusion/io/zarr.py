@@ -100,6 +100,8 @@ def read_zarr_tile(
     zarr_ts: ts.TensorStore,
     tile_idx: int,
     is_3d: bool = False,
+    z_level: int = None,
+    time_idx: int = 0,
 ) -> np.ndarray:
     """
     Read all channels of a tile from Zarr format.
@@ -111,7 +113,11 @@ def read_zarr_tile(
     tile_idx : int
         Index of the tile.
     is_3d : bool
-        If True, data is 3D and max projection is applied.
+        If True, data is 3D.
+    z_level : int, optional
+        Z-level to read. If None and is_3d, uses max projection.
+    time_idx : int
+        Timepoint to read. Defaults to 0.
 
     Returns
     -------
@@ -119,10 +125,15 @@ def read_zarr_tile(
         Tile data as float32.
     """
     if is_3d:
-        arr = zarr_ts[0, tile_idx, :, :, :, :].read().result()
-        arr = np.max(arr, axis=1)  # Max projection along Z
+        if z_level is not None:
+            # Read specific z-level
+            arr = zarr_ts[time_idx, tile_idx, :, z_level, :, :].read().result()
+        else:
+            # Max projection along Z (legacy behavior)
+            arr = zarr_ts[time_idx, tile_idx, :, :, :, :].read().result()
+            arr = np.max(arr, axis=1)
     else:
-        arr = zarr_ts[0, tile_idx, :, :, :].read().result()
+        arr = zarr_ts[time_idx, tile_idx, :, :, :].read().result()
     return arr.astype(np.float32)
 
 
@@ -133,6 +144,8 @@ def read_zarr_region(
     x_slice: slice,
     channel_idx: int = 0,
     is_3d: bool = False,
+    z_level: int = None,
+    time_idx: int = 0,
 ) -> np.ndarray:
     """
     Read a region of a single channel from Zarr format.
@@ -149,6 +162,10 @@ def read_zarr_region(
         Channel index.
     is_3d : bool
         If True, data is 3D.
+    z_level : int, optional
+        Z-level to read. If None and is_3d, uses max projection.
+    time_idx : int
+        Timepoint to read. Defaults to 0.
 
     Returns
     -------
@@ -156,11 +173,19 @@ def read_zarr_region(
         Tile region as float32.
     """
     if is_3d:
-        arr = zarr_ts[0, tile_idx, channel_idx, :, y_slice, x_slice].read().result()
-        arr = np.max(arr, axis=0)
-        arr = arr[np.newaxis, :, :]
+        if z_level is not None:
+            # Read specific z-level
+            arr = (
+                zarr_ts[time_idx, tile_idx, channel_idx, z_level, y_slice, x_slice].read().result()
+            )
+            arr = arr[np.newaxis, :, :]
+        else:
+            # Max projection along Z (legacy behavior)
+            arr = zarr_ts[time_idx, tile_idx, channel_idx, :, y_slice, x_slice].read().result()
+            arr = np.max(arr, axis=0)
+            arr = arr[np.newaxis, :, :]
     else:
-        arr = zarr_ts[0, tile_idx, channel_idx, y_slice, x_slice].read().result()
+        arr = zarr_ts[time_idx, tile_idx, channel_idx, y_slice, x_slice].read().result()
         arr = arr[np.newaxis, :, :]
     return arr.astype(np.float32)
 
