@@ -36,7 +36,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent
 
-
 STYLE_SHEET = """
 QGroupBox {
     font-weight: bold;
@@ -238,6 +237,15 @@ class PreviewWorker(QThread):
             tf.refine_tile_positions_with_cross_correlation()
             self.progress.emit(f"Found {len(tf.pairwise_metrics)} pairs")
 
+            # Estimate pixel size
+            try:
+                estimated_px, deviation = tf.estimate_pixel_size()
+                self.progress.emit(
+                    f"Estimated pixel size: {estimated_px:.4f} µm ({deviation:+.1f}% from metadata)"
+                )
+            except ValueError:
+                pass  # Not enough pairs for estimation
+
             tf.optimize_shifts(
                 method="TWO_ROUND_ITERATIVE", rel_thresh=0.5, abs_thresh=2.0, iterative=True
             )
@@ -344,6 +352,7 @@ class FusionWorker(QThread):
         registration_z=None,
         registration_t=0,
         registration_channel=0,
+        use_estimated_pixel_size=False,
     ):
         super().__init__()
         self.tiff_path = tiff_path
@@ -356,6 +365,7 @@ class FusionWorker(QThread):
         self.registration_z = registration_z
         self.registration_t = registration_t
         self.registration_channel = registration_channel
+        self.use_estimated_pixel_size = use_estimated_pixel_size
         self.output_path = None
 
     def run(self):
@@ -426,6 +436,18 @@ class FusionWorker(QThread):
                 self.progress.emit(
                     f"Registration complete: {len(tf.pairwise_metrics)} pairs [{reg_time:.1f}s]"
                 )
+
+                # Estimate pixel size
+                try:
+                    estimated_px, deviation = tf.estimate_pixel_size()
+                    self.progress.emit(
+                        f"Estimated pixel size: {estimated_px:.4f} µm ({deviation:+.1f}% from metadata)"
+                    )
+                    if self.use_estimated_pixel_size and abs(deviation) > 1.0:
+                        tf._pixel_size = (estimated_px, estimated_px)
+                        self.progress.emit("Using estimated pixel size for stitching")
+                except ValueError as e:
+                    self.progress.emit(f"Could not estimate pixel size: {e}")
             else:
                 tf.threshold = 1.0  # Skip registration
                 self.progress.emit("Using stage positions (no registration)")
@@ -739,6 +761,7 @@ class StitcherGUI(QMainWindow):
         # Dataset dimension state (for registration z/t selection)
         self.dataset_n_z = 1
         self.dataset_n_t = 1
+        self.estimated_pixel_size = None
         self.dataset_n_channels = 1
         self.dataset_channel_names = []
 
@@ -962,6 +985,13 @@ class StitcherGUI(QMainWindow):
         blend_value_layout.addWidget(self.blend_spin)
         blend_value_layout.addStretch()
         settings_layout.addWidget(self.blend_value_widget)
+
+        self.use_estimated_px_checkbox = QCheckBox("Use estimated pixel size")
+        self.use_estimated_px_checkbox.setToolTip(
+            "Estimate pixel size from registration and use it for stitching"
+        )
+        self.use_estimated_px_checkbox.setChecked(False)
+        settings_layout.addWidget(self.use_estimated_px_checkbox)
 
         layout.addWidget(settings_group)
 
@@ -1364,6 +1394,7 @@ class StitcherGUI(QMainWindow):
             registration_z=registration_z,
             registration_t=registration_t,
             registration_channel=registration_channel,
+            use_estimated_pixel_size=self.use_estimated_px_checkbox.isChecked(),
         )
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.on_fusion_finished)
