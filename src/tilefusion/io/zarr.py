@@ -178,16 +178,14 @@ def read_zarr_region(
             arr = (
                 zarr_ts[time_idx, tile_idx, channel_idx, z_level, y_slice, x_slice].read().result()
             )
-            arr = arr[np.newaxis, :, :]
         else:
             # Max projection along Z (legacy behavior)
             arr = zarr_ts[time_idx, tile_idx, channel_idx, :, y_slice, x_slice].read().result()
             arr = np.max(arr, axis=0)
-            arr = arr[np.newaxis, :, :]
     else:
         arr = zarr_ts[time_idx, tile_idx, channel_idx, y_slice, x_slice].read().result()
-        arr = arr[np.newaxis, :, :]
-    return arr.astype(np.float32)
+
+    return arr[np.newaxis, :, :].astype(np.float32)
 
 
 def create_zarr_store(

@@ -368,6 +368,21 @@ class FusionWorker(QThread):
         self.use_estimated_pixel_size = use_estimated_pixel_size
         self.output_path = None
 
+    def _apply_estimated_pixel_size(self, tf, estimated_px: float, deviation: float) -> None:
+        """Apply estimated pixel size if enabled and within reasonable bounds."""
+        if not self.use_estimated_pixel_size or abs(deviation) <= 1.0:
+            return
+
+        # Sanity check: estimated should be within 50% of original
+        ratio = estimated_px / tf._pixel_size[0]
+        if 0.5 < ratio < 2.0:
+            tf._pixel_size = (estimated_px, estimated_px)
+            self.progress.emit("Using estimated pixel size for stitching")
+        else:
+            self.progress.emit(
+                f"Warning: Estimated pixel size {estimated_px:.4f} is unreasonable, ignoring"
+            )
+
     def run(self):
         try:
             from tilefusion import TileFusion
@@ -443,15 +458,7 @@ class FusionWorker(QThread):
                     self.progress.emit(
                         f"Estimated pixel size: {estimated_px:.4f} µm ({deviation:+.1f}% from metadata)"
                     )
-                    if self.use_estimated_pixel_size and abs(deviation) > 1.0:
-                        # Sanity check: estimated should be within 50% of original
-                        if 0.5 < estimated_px / tf._pixel_size[0] < 2.0:
-                            tf._pixel_size = (estimated_px, estimated_px)
-                            self.progress.emit("Using estimated pixel size for stitching")
-                        else:
-                            self.progress.emit(
-                                f"Warning: Estimated pixel size {estimated_px:.4f} is unreasonable, ignoring"
-                            )
+                    self._apply_estimated_pixel_size(tf, estimated_px, deviation)
                 except ValueError as e:
                     self.progress.emit(f"Could not estimate pixel size: {e}")
             else:
