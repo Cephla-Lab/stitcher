@@ -799,6 +799,60 @@ class TileFusion:
 
         io_executor.shutdown(wait=True)
 
+    def estimate_pixel_size(self) -> Tuple[float, float]:
+        """
+        Estimate pixel size from registration results.
+
+        Compares expected shifts (from stage positions / metadata pixel size)
+        with measured shifts (from cross-correlation) to estimate true pixel size.
+
+        Returns
+        -------
+        estimated_pixel_size : float
+            Estimated pixel size in same units as metadata (typically um).
+        deviation_percent : float
+            Percentage deviation from metadata: (estimated/metadata - 1) * 100
+
+        Raises
+        ------
+        ValueError
+            If no valid pairwise metrics available.
+        """
+        if not self.pairwise_metrics:
+            raise ValueError("No pairwise metrics available. Run registration first.")
+
+        ratios = []
+
+        for (i, j), (dy_measured, dx_measured, score) in self.pairwise_metrics.items():
+            # Get stage positions
+            pos_i = np.array(self._tile_positions[i])
+            pos_j = np.array(self._tile_positions[j])
+
+            # Expected shift in pixels = stage_distance / pixel_size
+            stage_diff = pos_j - pos_i  # (dy, dx) in physical units
+            expected_dy = stage_diff[0] / self._pixel_size[0]
+            expected_dx = stage_diff[1] / self._pixel_size[1]
+
+            # Compute ratio for non-zero shifts
+            if abs(dx_measured) > 5:  # Horizontal shift
+                ratio = expected_dx / dx_measured
+                ratios.append(ratio)
+            if abs(dy_measured) > 5:  # Vertical shift
+                ratio = expected_dy / dy_measured
+                ratios.append(ratio)
+
+        if not ratios:
+            raise ValueError("No valid shift measurements for pixel size estimation.")
+
+        # Use median to filter outliers
+        median_ratio = float(np.median(ratios))
+
+        # Estimated pixel size (assume isotropic)
+        estimated = self._pixel_size[0] * median_ratio
+        deviation_percent = (median_ratio - 1.0) * 100.0
+
+        return estimated, deviation_percent
+
     # -------------------------------------------------------------------------
     # Optimization
     # -------------------------------------------------------------------------
