@@ -84,6 +84,10 @@ class TileFusion:
         Channel index for registration.
     multiscale_downsample : str
         Either "stride" (default) or "block_mean" to control multiscale reduction.
+    registration_z : int, optional
+        Z-level to use for registration. If None, uses middle z-level.
+    registration_t : int
+        Timepoint to use for registration. Defaults to 0.
     """
 
     def __init__(
@@ -461,7 +465,9 @@ class TileFusion:
     # I/O methods (delegate to format-specific loaders)
     # -------------------------------------------------------------------------
 
-    def _read_tile(self, tile_idx: int, z_level: int = None, time_idx: int = None) -> np.ndarray:
+    def _read_tile(
+        self, tile_idx: int, z_level: Optional[int] = None, time_idx: Optional[int] = None
+    ) -> np.ndarray:
         """Read a single tile from the input data (all channels)."""
         if z_level is None:
             z_level = self._registration_z  # Default to registration z-level
@@ -471,7 +477,7 @@ class TileFusion:
         if self._is_zarr_format:
             zarr_ts = self._metadata["tensorstore"]
             is_3d = self._metadata.get("is_3d", False)
-            tile = read_zarr_tile(zarr_ts, tile_idx, is_3d)
+            tile = read_zarr_tile(zarr_ts, tile_idx, is_3d, z_level=z_level, time_idx=time_idx)
         elif self._is_individual_tiffs_format:
             tile = read_individual_tiffs_tile(
                 self._metadata["image_folder"],
@@ -508,8 +514,8 @@ class TileFusion:
         tile_idx: int,
         y_slice: slice,
         x_slice: slice,
-        z_level: int = None,
-        time_idx: int = None,
+        z_level: Optional[int] = None,
+        time_idx: Optional[int] = None,
     ) -> np.ndarray:
         """Read a region of a tile from the input data."""
         if z_level is None:
@@ -521,7 +527,14 @@ class TileFusion:
             zarr_ts = self._metadata["tensorstore"]
             is_3d = self._metadata.get("is_3d", False)
             region = read_zarr_region(
-                zarr_ts, tile_idx, y_slice, x_slice, self.channel_to_use, is_3d
+                zarr_ts,
+                tile_idx,
+                y_slice,
+                x_slice,
+                self.channel_to_use,
+                is_3d,
+                z_level=z_level,
+                time_idx=time_idx,
             )
         elif self._is_individual_tiffs_format:
             region = read_individual_tiffs_region(
@@ -798,6 +811,60 @@ class TileFusion:
             self.pairwise_metrics[(i_pos, j_pos)] = (dy_s, dx_s, round(score, 3))
 
         io_executor.shutdown(wait=True)
+
+    def estimate_pixel_size(self) -> Tuple[float, float]:
+        """
+        Estimate pixel size from registration results.
+
+        Compares expected shifts (from stage positions / metadata pixel size)
+        with measured shifts (from cross-correlation) to estimate true pixel size.
+
+        Returns
+        -------
+        estimated_pixel_size : float
+            Estimated pixel size in same units as metadata (typically um).
+        deviation_percent : float
+            Percentage deviation from metadata: (estimated/metadata - 1) * 100
+
+        Raises
+        ------
+        ValueError
+            If no valid pairwise metrics available.
+        """
+        if not self.pairwise_metrics:
+            raise ValueError("No pairwise metrics available. Run registration first.")
+
+        ratios = []
+
+        for (i, j), (dy_measured, dx_measured, score) in self.pairwise_metrics.items():
+            # Get stage positions
+            pos_i = np.array(self._tile_positions[i])
+            pos_j = np.array(self._tile_positions[j])
+
+            # Expected shift in pixels = stage_distance / pixel_size
+            stage_diff = pos_j - pos_i  # (dy, dx) in physical units
+            expected_dy = stage_diff[0] / self._pixel_size[0]
+            expected_dx = stage_diff[1] / self._pixel_size[1]
+
+            # Compute ratio for non-zero shifts (both expected and measured must be significant)
+            if abs(dx_measured) > 5 and abs(expected_dx) > 5:  # Horizontal shift
+                ratio = expected_dx / dx_measured
+                ratios.append(ratio)
+            if abs(dy_measured) > 5 and abs(expected_dy) > 5:  # Vertical shift
+                ratio = expected_dy / dy_measured
+                ratios.append(ratio)
+
+        if not ratios:
+            raise ValueError("No valid shift measurements for pixel size estimation.")
+
+        # Use median to filter outliers
+        median_ratio = float(np.median(ratios))
+
+        # Estimated pixel size (assume isotropic)
+        estimated = self._pixel_size[0] * median_ratio
+        deviation_percent = (median_ratio - 1.0) * 100.0
+
+        return estimated, deviation_percent
 
     # -------------------------------------------------------------------------
     # Optimization
